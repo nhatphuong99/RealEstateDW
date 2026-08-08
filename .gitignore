@@ -168,3 +168,7 @@ pnpm-debug.log*
 .pnpm-store
 .vite/
 *.tsbuildinfo
+
+### Test resources
+crawler/test*
+crawler/test*.py
