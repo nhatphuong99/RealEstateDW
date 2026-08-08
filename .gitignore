@@ -168,3 +168,39 @@ pnpm-debug.log*
 .pnpm-store
 .vite/
 *.tsbuildinfo
+
+# Secrets & credentials
+.env
+.aws/
+aws_credentials*
+*.pem
+*.key
+
+# Python
+crawler/venv/
+*.pyc
+__pycache__/
+.ipynb_checkpoints/
+
+# Airflow (tự sinh sau khi init)
+config/webserver_config.py
+airflow.cfg
+logs/
+
+# Data & DB volumes (nếu mount ra thư mục local)
+data/raw/
+postgres-data/
+pgdata/
+metabase-data/
+metabase.db.mv.db
+
+# PySpark local mode
+spark_jobs/spark-warehouse/
+spark_jobs/*.log
+crawler/*.log
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
