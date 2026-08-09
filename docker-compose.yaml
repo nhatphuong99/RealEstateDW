@@ -383,7 +383,7 @@ services:
         condition: service_completed_successfully
   
   metabase:
-    image: metabase/metabase:latest
+    image: metabase/metabase:v0.63.x
     container_name: metabase
     hostname: metabase
     ports:
@@ -407,4 +407,4 @@ volumes:
   postgres-db-volume:
   postgres-dw-data:
   metabase-data:
-  
+
