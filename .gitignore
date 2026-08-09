@@ -204,3 +204,7 @@ crawler/*.log
 .idea/
 .DS_Store
 Thumbs.db
+
+### Test resources
+crawler/test*
+crawler/test*.py
