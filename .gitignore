@@ -206,5 +206,4 @@ crawler/*.log
 Thumbs.db
 
 ### Test resources
-crawler/test*
-crawler/test*.py
+crawler/test*/

@@ -1,0 +1,52 @@
+# Version control
+.git
+.gitignore
+
+# Python cache & virtual environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+.venv/
+env/
+venv/
+
+# Logs & temp files
+*.log
+*.tmp
+*.swp
+
+# Build artifacts
+build/
+dist/
+*.egg
+.eggs/
+
+# Airflow specific
+logs/
+tmp/
+unittests.cfg
+venv/
+
+# Spark temporary files
+spark-warehouse/
+derby.log
+metastore_db/
+
+# Database data directories (MongoDB, Postgres)
+*.db
+
+# Secrets & configs
+.env
+*.key
+*.crt
+*.pem
+secrets/
+config/local_settings.py
+
+# Docker files not needed inside image
+docker-compose.yml
+.dockerignore
+

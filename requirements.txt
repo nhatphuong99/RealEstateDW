@@ -9,6 +9,11 @@ requests==2.34.2
 beautifulsoup4==4.15.0     
 lxml==6.1.1                # parser tốc độ cao cho BeautifulSoup/Scrapy
 
+# --- Data Processing ---
+pyspark==4.2.0
+pandas<3.0.0
+pyarrow==25.0.0
+
 # --- Config & cloud ---
-python-dotenv==1.0.1        # đọc biến môi trường từ .env
+python-dotenv==1.2.2        # đọc biến môi trường từ .env
 boto3==1.43.66              
