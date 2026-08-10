@@ -1,6 +1,6 @@
 """
 Airflow DAG — Crawl alonhadat.com.vn theo batch ngắn, chạy NHIỀU LẦN/NGÀY.
-Thay thế hoàn toàn cho "scrapy runspider" — dùng package crawler_v3 tự viết.
+Thay thế hoàn toàn cho "scrapy runspider" — dùng package crawler tự viết.
 
 Vì sao không phải 1 DAG chạy 1 lần rồi lặp vô hạn (như vòng lặp sleep
 trong Note.md): mỗi lần trigger DAG chỉ xử lý 1 batch (~120 URL, ~10-15
@@ -33,7 +33,7 @@ def crawl_alonhadat_batch():
         HOÀN TOÀN — tránh insert lại seed mỗi lần DAG chạy (ON CONFLICT DO
         NOTHING trong enqueue_urls đã an toàn, nhưng check này tránh query
         dư thừa khi hàng đợi đã có dữ liệu)."""
-        from crawler_v3 import queue_manager, pagination
+        from crawler import queue_manager, pagination
         if not queue_manager.has_pending():
             inserted = pagination.enqueue_category_seeds()
             return {"seeds_inserted": inserted}
@@ -41,7 +41,7 @@ def crawl_alonhadat_batch():
 
     @task
     def crawl_batch():
-        from crawler_v3 import crawl_runner
+        from crawler import crawl_runner
         return crawl_runner.run_batch()
 
     ensure_seeds() >> crawl_batch()

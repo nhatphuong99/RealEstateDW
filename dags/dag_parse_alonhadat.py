@@ -23,7 +23,7 @@ def parse_alonhadat_batch():
 
     @task
     def parse_batch():
-        from crawler_v3 import parser_runner
+        from crawler import parser_runner
         return parser_runner.run()
 
     parse_batch()
