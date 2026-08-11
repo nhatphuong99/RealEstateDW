@@ -1,15 +1,21 @@
 
 # --- Web automation / crawling ---
+requests==2.34.2          
 playwright==1.61.0        # thay ChromeDriver bằng browser tự quản lý
 selenium==4.46.0         # dự phòng cho site cần đặc thù Selenium Manager
-scrapy==2.17.0
-scrapy-playwright==0.0.48  
-requests==2.34.2          
 
 # --- Parsing HTML/text ---
 beautifulsoup4==4.15.0     
 lxml==6.1.1                # parser tốc độ cao cho BeautifulSoup/Scrapy
 
+# --- Data Processing ---
+pyspark==4.2.0
+pandas<3.0.0
+pyarrow==25.0.0
+
 # --- Config & cloud ---
-python-dotenv==1.0.1        # đọc biến môi trường từ .env
+python-dotenv==1.2.2        # đọc biến môi trường từ .env
 boto3==1.43.66              
+
+# --- Database ---
+psycopg2-binary>=2.9
