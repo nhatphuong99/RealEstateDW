@@ -26,7 +26,7 @@ REQUEST_TIMEOUT_SECONDS = 15
 # giả định ban đầu. Tăng biên độ để giảm tần suất trung bình trong lúc
 # còn đang dò lại hành vi thật của site.
 MIN_DELAY_SECONDS = 15.0
-MAX_DELAY_SECONDS = 20.0
+MAX_DELAY_SECONDS = 30.0
 
 # --- Retry / backoff cho lỗi tạm thời ---
 # QUAN TRỌNG: 429 KHÔNG nằm trong danh sách này - xem lý do trong
@@ -34,7 +34,7 @@ MAX_DELAY_SECONDS = 20.0
 # thường). 429 được xử lý riêng, backoff hoàn toàn ở tầng hàng đợi
 # (queue_manager.mark_failed), theo đơn vị phút chứ không phải giây.
 RETRY_STATUS_CODES = {500, 502, 503, 504}
-BASE_BACKOFF_SECONDS = 10.0
+BASE_BACKOFF_SECONDS = 30.0
 MAX_BACKOFF_SECONDS = 300.0
 
 # --- Circuit breaker cho 429 liên tiếp trong 1 batch ---
@@ -51,7 +51,7 @@ BATCH_COOLDOWN_MINUTES = 30  # backoff áp dụng cho các URL bị đẩy lại
 # lần/ngày (xem dags/dag_crawl_alonhadat.py) - đúng tinh thần "chia batch
 # ngắn" đã rút ra từ phát hiện rate-limit.
 CRAWL_BATCH_SIZE = 120
-STALE_IN_PROGRESS_MINUTES = 30  # quá thời gian này mà còn 'in_progress' -> coi là crash, requeue
+STALE_IN_PROGRESS_MINUTES = 60  # quá thời gian này mà còn 'in_progress' -> coi là crash, requeue
 
 # --- Nguồn crawl ---
 # Chỉ còn alonhadat.com.vn là nguồn chính - xem quyết định trong

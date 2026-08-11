@@ -205,5 +205,8 @@ crawler/*.log
 .DS_Store
 Thumbs.db
 
-### Test resources
+# Test resources
 crawler/test*/
+
+# Docs
+docs/
