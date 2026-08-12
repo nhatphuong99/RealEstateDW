@@ -169,9 +169,5 @@ pnpm-debug.log*
 .vite/
 *.tsbuildinfo
 
-# Test resources
-crawler/test*
-crawler/test*.py
-
-# Docs
+### Docs
 docs/
