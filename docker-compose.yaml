@@ -51,18 +51,7 @@
 #
 # WARNING: cấu hình này dành cho local development. KHÔNG dùng nguyên bản này
 # để deploy production.
-#
-# CẬP NHẬT 2026/08/13 (lần 3) — Timezone:
-#   - postgres-dw: đổi sang Asia/Ho_Chi_Minh (TZ env + xem thêm
-#     sql/migration_004_timezone.sql để đổi luôn ở tầng database, hiệu
-#     lực ngay không cần đợi container restart).
-#   - Airflow (service "postgres" nội bộ): CỐ TÌNH KHÔNG đổi timezone
-#     DB — Airflow lưu execution_date/timestamp nội bộ theo UTC, đổi
-#     timezone DB có rủi ro ảnh hưởng logic lập lịch của scheduler.
-#     Thay vào đó dùng đúng cơ chế của Airflow để HIỂN THỊ giờ địa
-#     phương (AIRFLOW__CORE__DEFAULT_TIMEZONE,
-#     AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE bên dưới) mà không đụng
-#     vào cách lưu trữ nội bộ.
+
  
 ---
 name: real-estate-dw
@@ -94,11 +83,6 @@ x-airflow-common:
     # See https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check-health.html#scheduler-health-check-server
     # yamllint enable rule:line-length
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
-    # CẬP NHẬT 2026/08/13: CHỈ đổi timezone HIỂN THỊ (UI, log dòng thời
-    # gian đọc được), KHÔNG đổi timezone lưu trữ nội bộ của metadata DB
-    # "airflow" (vẫn giữ UTC — đúng khuyến nghị chính thức của Airflow).
-    AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Ho_Chi_Minh
-    AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: Asia/Ho_Chi_Minh
     # WARNING: Use _PIP_ADDITIONAL_REQUIREMENTS option ONLY for a quick checks
     # for other purpose (development, test and especially production usage) build/extend Airflow image.
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
@@ -140,15 +124,6 @@ services:
       POSTGRES_USER: ${POSTGRES_DW_USER}
       POSTGRES_PASSWORD: ${POSTGRES_DW_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DW_DB}
-      # CẬP NHẬT 2026/08/13: đổi timezone OS-level của container sang
-      # giờ Việt Nam. LƯU Ý: chỉ áp dụng khi container được TẠO MỚI
-      # (docker compose up -d --force-recreate postgres-dw); container
-      # đang chạy sẵn không tự áp dụng biến môi trường mới. Để có hiệu
-      # lực NGAY không cần recreate container, dùng
-      # sql/migration_004_timezone.sql (ALTER DATABASE ... SET timezone)
-      # — đây mới là cách chính, TZ ở đây chỉ là lớp bổ sung cho nhất
-      # quán log/OS-level.
-      TZ: Asia/Ho_Chi_Minh
     ports:
       - "5433:5432"
     volumes:
@@ -169,8 +144,6 @@ services:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
-      # CỐ TÌNH KHÔNG set TZ ở đây — giữ nguyên UTC cho metadata DB của
-      # Airflow (xem giải thích ở đầu file / x-airflow-common phía trên).
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
     networks:
@@ -423,10 +396,6 @@ services:
       - /dev/urandom:/dev/random:ro
     environment:
       MB_DB_FILE: /metabase-data/metabase.db
-      # Metabase hiển thị thời gian theo timezone của trình duyệt người
-      # dùng theo mặc định, nên KHÔNG bắt buộc phải set ở đây; thêm vào
-      # để nhất quán nếu muốn ép cố định giờ Việt Nam trong report/export.
-      JAVA_TIMEZONE: Asia/Ho_Chi_Minh
     networks:
       - real-estate-network
     healthcheck:
