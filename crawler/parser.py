@@ -32,8 +32,8 @@ def _text_or_none(el) -> Optional[str]:
 def _parse_int(text: Optional[str]) -> Optional[int]:
     if not text:
         return None
-    digits = re.sub(r"[^\d]", "", text)
-    return int(digits) if digits else None
+    match = re.search(r"\d+", text)
+    return int(match.group()) if match else None
 
 
 def _parse_float(text: Optional[str]) -> Optional[float]:
