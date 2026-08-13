@@ -123,6 +123,8 @@ services:
       POSTGRES_USER: ${POSTGRES_DW_USER}
       POSTGRES_PASSWORD: ${POSTGRES_DW_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DW_DB}
+      TZ: Asia/Ho_Chi_Minh
+      PGTZ: Asia/Ho_Chi_Minh
     ports:
       - "5433:5432"
     volumes:
@@ -143,6 +145,8 @@ services:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
+      TZ: Asia/Ho_Chi_Minh
+      PGTZ: Asia/Ho_Chi_Minh
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
     networks:
