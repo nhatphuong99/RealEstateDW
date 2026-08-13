@@ -139,3 +139,38 @@ PROXY_MAX_REUSE_COUNT = 5
 # Khi 1 URL gặp 429/CAPTCHA, số lần được phép đổi proxy để thử lại CÙNG
 # URL đó trước khi coi là thất bại thật sự.
 PROXY_RETRY_PER_URL = 2
+
+# ---------------------------------------------------------------------
+# BẮT BUỘC dùng proxy — CẬP NHẬT 2026/08/13 (lần 3): không còn fallback
+# fetch trực tiếp khi hết proxy, vì mục tiêu là bảo vệ IP thật của máy
+# host/VM khỏi bị alonhadat chặn. Đổi lại, phải giới hạn nghiêm ngặt số
+# lần quét lại nguồn free (tốn thời gian) — nếu quét đủ số lần mà vẫn
+# không có proxy nào sống, DỪNG hẳn batch đó (không cố crawl).
+# ---------------------------------------------------------------------
+
+# Số lần TỐI ĐA quét lại toàn bộ nguồn free public (Tầng 2) trong 1 lần
+# gọi get_or_refresh_pool(), nếu cache (Tầng 1) không đủ proxy. Mỗi lần
+# quét tốn vài chục giây - vài phút tuỳ số candidate, nên giới hạn thấp.
+PROXY_SCAN_MAX_ATTEMPTS = 2
+
+# Nghỉ giữa 2 lần quét lại (giây) — cho phép trạng thái "sống/chết" của
+# 1 vài proxy có cơ hội thay đổi giữa 2 lần thử, dù không nhiều ý nghĩa
+# nếu chỉ cách nhau vài giây (danh sách candidate ít khi đổi ngay lập tức).
+PROXY_SCAN_RETRY_DELAY_SECONDS = 10
+
+# ---------------------------------------------------------------------
+# Reset định kỳ toàn bộ queue của 1 category — CẬP NHẬT 2026/08/13 (lần
+# 3). Lý do: alonhadat KHÔNG sort tin theo thời gian đăng (đã xác nhận
+# thực nghiệm), nếu chỉ luôn crawl tiếp trang phía sau (page_num tăng
+# dần qua enqueue_next_page) mà không bao giờ quay lại trang 1, sẽ bỏ
+# sót vĩnh viễn các tin mới bị "chôn" ở những trang đầu do tin VIP/được
+# đẩy chiếm chỗ liên tục (xem tong_hop_boi_canh_crawler_alonhadat.md
+# mục 8-9 — đây là trade-off đã được chấp nhận từ trước: full re-crawl
+# định kỳ là cách an toàn duy nhất).
+# ---------------------------------------------------------------------
+
+# Sau bao nhiêu giờ kể từ lần full-reset gần nhất của 1 category thì
+# reset lại TOÀN BỘ [URL-DS] của category đó về 'pending' (crawl lại từ
+# trang 1). Giá trị khởi điểm 24h — nên điều chỉnh dựa theo tốc độ tin
+# mới xuất hiện thực tế quan sát được qua seen_count/known_listing_urls.
+QUEUE_FULL_RESET_INTERVAL_HOURS = 24

@@ -11,6 +11,18 @@ error_log.md):
      khi coi là thất bại thật sự.
   2. Bronze giờ CHỈ lưu HTML của các khối <article class="property-item">
      (tin đăng thật) thay vì toàn bộ trang.
+
+CẬP NHẬT 2026/08/13 (lần 3):
+  3. Proxy giờ BẮT BUỘC (config.USE_PROXY_ROTATION=True mặc định) —
+     KHÔNG còn fallback fetch trực tiếp khi hết proxy. Nếu
+     get_or_refresh_pool() trả None (không tìm được proxy sau
+     PROXY_SCAN_MAX_ATTEMPTS lần quét), toàn bộ batch DỪNG ngay từ đầu.
+     Nếu pool cạn GIỮA batch (do report_failure loại dần), batch cũng
+     dừng ngay tại đó thay vì crawl trực tiếp.
+  4. Thêm queue_reset.reset_stale_categories() ở đầu mỗi run_batch():
+     định kỳ đưa toàn bộ [URL-DS] của 1 category về 'pending' để crawl
+     lại từ trang 1, tránh bỏ sót tin mới bị chôn ở các trang đầu do
+     alonhadat không sort theo thời gian đăng.
 """
 import logging
 import time
@@ -20,7 +32,7 @@ from typing import List, Optional, Set, Tuple
 
 from bs4 import BeautifulSoup
 
-from crawler import config, db, fetcher, proxy_manager, queue_manager, storage
+from crawler import config, db, fetcher, proxy_manager, queue_manager, queue_reset, storage
 from crawler.fetcher import FetchResult
 from crawler.proxy_manager import ProxyEntry, ProxyPool
 
@@ -38,6 +50,9 @@ class RunSummary:
     circuit_breaker_triggered: bool = False
     next_pages_enqueued: int = 0
     proxies_used: int = 0
+    aborted_no_proxy: bool = False
+    stopped_no_proxy_mid_run: bool = False
+    queue_reset_categories: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
 
 
@@ -97,10 +112,12 @@ def _fetch_with_proxy_retry(
 
 def run_batch(limit: int = None) -> RunSummary:
     """
-    Trình tự: requeue_stale -> seed_category_start_pages ->
-    get_or_refresh_pool -> claim_batch -> (delay -> fetch (tự đổi proxy
-    nếu 429/CAPTCHA) -> trích HTML article -> lưu S3 -> cập nhật queue
-    -> enqueue trang kế tiếp) -> record_proxy_outcome -> circuit breaker.
+    Trình tự: requeue_stale -> reset_stale_categories (định kỳ) ->
+    seed_category_start_pages -> get_or_refresh_pool (DỪNG nếu None) ->
+    claim_batch -> (delay -> fetch (tự đổi proxy nếu 429/CAPTCHA, DỪNG
+    batch nếu hết proxy giữa chừng) -> trích HTML article -> lưu S3 ->
+    cập nhật queue -> enqueue trang kế tiếp) -> record_proxy_outcome ->
+    circuit breaker.
     """
     limit = limit or config.MAX_PAGES_PER_RUN
     run_id = uuid.uuid4().hex[:8]
@@ -112,11 +129,27 @@ def run_batch(limit: int = None) -> RunSummary:
         if reclaimed:
             logger.info("requeue_stale: đưa %d row kẹt 'in_progress' về 'pending'", reclaimed)
 
+        reset_categories = queue_reset.reset_stale_categories(conn)
+        if reset_categories:
+            summary.queue_reset_categories = reset_categories
+            logger.warning(
+                "run_id=%s RESET ĐỊNH KỲ %d category về 'pending': %s",
+                run_id, len(reset_categories), ", ".join(reset_categories),
+            )
+
         queue_manager.seed_category_start_pages(conn)
 
         pool: Optional[ProxyPool] = None
         if config.USE_PROXY_ROTATION:
             pool = proxy_manager.get_or_refresh_pool(conn)
+            if pool is None:
+                summary.aborted_no_proxy = True
+                logger.error(
+                    "run_id=%s KHÔNG có proxy khả dụng sau %d lần quét — DỪNG batch này "
+                    "(bắt buộc dùng proxy, không crawl trực tiếp theo cấu hình hiện tại).",
+                    run_id, config.PROXY_SCAN_MAX_ATTEMPTS,
+                )
+                return summary
             summary.proxies_used = len(pool)
 
         batch = queue_manager.claim_batch(conn, limit=limit)
@@ -136,6 +169,16 @@ def run_batch(limit: int = None) -> RunSummary:
                     "Circuit breaker kích hoạt (%d lần 429/CAPTCHA liên tiếp) — dừng run_id=%s, "
                     "còn %d URL chưa xử lý sẽ đợi lần trigger kế tiếp",
                     consecutive_blocked, run_id, len(batch) - i,
+                )
+                break
+
+            if pool is not None and len(pool) == 0:
+                summary.stopped_no_proxy_mid_run = True
+                logger.error(
+                    "run_id=%s HẾT proxy giữa batch (đã xử lý %d/%d URL) — dừng ngay, "
+                    "không crawl trực tiếp. %d URL còn lại vẫn ở 'in_progress', sẽ được "
+                    "requeue_stale() đưa lại 'pending' sau %d phút để lần trigger sau xử lý tiếp.",
+                    run_id, i, len(batch), len(batch) - i, config.STALE_IN_PROGRESS_MINUTES,
                 )
                 break
 

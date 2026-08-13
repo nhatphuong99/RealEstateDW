@@ -160,11 +160,20 @@ def load_cache(conn) -> List[ProxyEntry]:
     return entries
 
 
-def get_or_refresh_pool(conn, min_size: int = None) -> "ProxyPool":
-    """Thử cache trước (nhanh), CHỈ quét lại toàn bộ nguồn public (chậm)
-    khi cache không đủ min_size proxy sống. Trả về ProxyPool RỖNG (không
-    raise lỗi) nếu không tìm được proxy nào — crawl_runner tự fallback
-    về fetch trực tiếp không qua proxy."""
+def get_or_refresh_pool(conn, min_size: int = None) -> Optional["ProxyPool"]:
+    """
+    Thử cache trước (nhanh). Nếu không đủ min_size, quét lại toàn bộ
+    nguồn public TỐI ĐA config.PROXY_SCAN_MAX_ATTEMPTS lần (giới hạn để
+    tránh tốn quá nhiều thời gian) — mỗi lần cách nhau
+    config.PROXY_SCAN_RETRY_DELAY_SECONDS giây.
+
+    Trả về:
+      - ProxyPool có >=1 proxy nếu tìm được ít nhất 1.
+      - None nếu KHÔNG tìm được proxy nào sống sau toàn bộ số lần quét
+        cho phép (cache lẫn full scan) — proxy là BẮT BUỘC (không còn
+        fallback fetch trực tiếp), nên None nghĩa là "phải dừng batch
+        này lại", không phải "cứ crawl trực tiếp".
+    """
     if min_size is None:
         min_size = config.PROXY_POOL_MIN_SIZE
 
@@ -178,21 +187,39 @@ def get_or_refresh_pool(conn, min_size: int = None) -> "ProxyPool":
         )
         return ProxyPool(alive_from_cache)
 
-    logger.info(
-        "Cache chỉ còn %d/%d proxy sống (< min_size=%d) -> quét lại toàn bộ nguồn public...",
-        len(alive_from_cache), len(cached), min_size,
-    )
-    candidates = fetch_candidate_proxies()
-    fresh_alive = build_working_pool(candidates)
+    combined = {p.url: p for p in alive_from_cache}
+    for attempt in range(1, config.PROXY_SCAN_MAX_ATTEMPTS + 1):
+        logger.info(
+            "Cache chỉ có %d/%d proxy sống (< min_size=%d) -> quét toàn bộ nguồn public, "
+            "lần %d/%d...",
+            len(combined), len(cached), min_size, attempt, config.PROXY_SCAN_MAX_ATTEMPTS,
+        )
+        candidates = fetch_candidate_proxies()
+        fresh_alive = build_working_pool(candidates)
+        for p in fresh_alive:
+            combined[p.url] = p
 
-    combined = {p.url: p for p in (alive_from_cache + fresh_alive)}
+        if len(combined) >= min_size:
+            break
+        if attempt < config.PROXY_SCAN_MAX_ATTEMPTS:
+            time.sleep(config.PROXY_SCAN_RETRY_DELAY_SECONDS)
+
     if not combined:
+        logger.error(
+            "KHÔNG tìm được proxy nào sống sau %d lần quét toàn bộ nguồn free (cache cũng "
+            "không có gì dùng được). Proxy là BẮT BUỘC theo cấu hình -> trả về None, "
+            "crawl_runner sẽ DỪNG batch này (không crawl trực tiếp).",
+            config.PROXY_SCAN_MAX_ATTEMPTS,
+        )
+        return None
+
+    if len(combined) < min_size:
         logger.warning(
-            "KHÔNG có proxy nào sống (cache lẫn quét mới) — batch này sẽ fetch "
-            "TRỰC TIẾP không qua proxy."
+            "Chỉ tìm được %d/%d proxy sống sau %d lần quét (dưới min_size nhưng vẫn >=1) "
+            "-> vẫn dùng để crawl, chấp nhận pool nhỏ hơn mong muốn.",
+            len(combined), min_size, config.PROXY_SCAN_MAX_ATTEMPTS,
         )
 
-    # get_or_refresh_pool(conn, min_size)
     return ProxyPool(list(combined.values()))
 
 
