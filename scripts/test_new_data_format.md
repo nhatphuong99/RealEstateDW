@@ -1,11 +1,12 @@
-# Read the Alonhadat Crawled-Data Parquet with Python
+# Read the Alonhadat Crawled-Data Parquet Parts with Python
 
 ## Dataset
 
-- Download: <https://cdn.cuhuuhoang.com/1m/alonhadat-10000.parquet>
-- Rows: `10,000`
+- Files: `part1.parquet` through `part77.parquet`
+- URL pattern: `https://cdn.cuhuuhoang.com/alonhadat/partN.parquet`, where `N` is from `1` to `77`
+- Total rows: `764,212`
+- Rows per file: `10,000` in parts 1-76 and `4,212` in part 77
 - Compression: Parquet with Zstandard compression
-- SHA-256: `1c65ead24a99363a9784c9e140a3ea6950fb1277b3eee2b8a848db9932acc9f6`
 - Columns:
   - `url`: string
   - `crawl_date`: timestamp
@@ -17,59 +18,62 @@
 python3 -m pip install pyarrow
 ```
 
-## Download and Verify
+## Download All 77 Parts
+
+The full dataset is about 3.4 GiB. This downloads one file at a time and skips files that already exist:
 
 ```python
 from pathlib import Path
 from urllib.request import urlretrieve
-import hashlib
 
-source = "https://cdn.cuhuuhoang.com/1m/alonhadat-10000.parquet"
-path = Path("alonhadat-10000.parquet")
-expected_sha256 = "1c65ead24a99363a9784c9e140a3ea6950fb1277b3eee2b8a848db9932acc9f6"
+base_url = "https://cdn.cuhuuhoang.com/alonhadat"
+output_dir = Path("alonhadat")
+output_dir.mkdir(parents=True, exist_ok=True)
 
-urlretrieve(source, path)
+for part_number in range(1, 78):
+    name = f"part{part_number}.parquet"
+    path = output_dir / name
+    if path.exists():
+        print(f"Skipping {path}")
+        continue
 
-digest = hashlib.sha256(path.read_bytes()).hexdigest()
-if digest != expected_sha256:
-    raise ValueError(f"Checksum mismatch: {digest}")
+    print(f"Downloading {name}")
+    urlretrieve(f"{base_url}/{name}", path)
 ```
 
-For a large future dump, calculate the checksum without loading the file into memory:
-
-```python
-import hashlib
-
-digest = hashlib.sha256()
-with open("alonhadat-10000.parquet", "rb") as stream:
-    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-        digest.update(chunk)
-
-print(digest.hexdigest())
-```
-
-## Inspect the Schema
+## Inspect One Part
 
 ```python
 import pyarrow.parquet as pq
 
-parquet = pq.ParquetFile("alonhadat-10000.parquet")
+parquet = pq.ParquetFile("alonhadat/part1.parquet")
 print(parquet.schema_arrow)
 print("rows:", parquet.metadata.num_rows)
 ```
 
 Expected Arrow types are `string`, `timestamp[us]`, and `binary`.
 
-## Stream Rows in Batches
+## Read All Parts as One Dataset
 
-Do this instead of loading a large dump into memory at once:
+Pass the files in numeric order so `part10.parquet` does not come before `part2.parquet`:
 
 ```python
-import pyarrow.parquet as pq
+from pathlib import Path
+import pyarrow.dataset as ds
 
-parquet = pq.ParquetFile("alonhadat-10000.parquet")
+files = [str(Path("alonhadat") / f"part{n}.parquet") for n in range(1, 78)]
+dataset = ds.dataset(files, format="parquet")
 
-for batch in parquet.iter_batches(
+print(dataset.schema)
+print("rows:", dataset.count_rows())
+```
+
+## Stream Rows in Batches
+
+Stream the dataset instead of loading all raw HTML into memory:
+
+```python
+for batch in dataset.to_batches(
     batch_size=1_000,
     columns=["url", "crawl_date", "html"],
 ):
@@ -84,13 +88,13 @@ for batch in parquet.iter_batches(
 
 ## Decode HTML
 
-Most sampled pages decode as UTF-8. Use replacement for malformed byte sequences:
+Most pages can be decoded as UTF-8. Use replacement for malformed byte sequences:
 
 ```python
 html_text = html_bytes.decode("utf-8", errors="replace")
 ```
 
-If accurate charset handling is important, detect it from the HTML bytes:
+For charset detection:
 
 ```bash
 python3 -m pip install charset-normalizer
@@ -122,30 +126,24 @@ print(text[:500])
 
 Passing `bytes` directly lets the parser inspect HTML charset declarations.
 
-## Read Selected Columns or Rows
+## Read Selected Columns
 
-Read only URL and crawl date:
+Reading only `url` and `crawl_date` avoids loading the much larger HTML values:
 
 ```python
-import pyarrow.parquet as pq
-
-table = pq.read_table(
-    "alonhadat-10000.parquet",
-    columns=["url", "crawl_date"],
-)
+table = dataset.to_table(columns=["url", "crawl_date"])
 print(table.to_pandas().head())
 ```
 
-Filter with PyArrow Dataset:
+Filter rows by URL while selecting only the required columns:
 
 ```python
-import pyarrow.dataset as ds
 import pyarrow.compute as pc
+import pyarrow.dataset as ds
 
-dataset = ds.dataset("alonhadat-10000.parquet", format="parquet")
 table = dataset.to_table(
     columns=["url", "crawl_date"],
-    filter=pc.match_substring(ds.field("url"), "/tags/"),
+    filter=pc.match_substring(ds.field("url"), "alonhadat.com.vn"),
 )
 print(table.num_rows)
 ```
@@ -154,10 +152,9 @@ print(table.num_rows)
 
 ```python
 from pathlib import Path
-import pyarrow.parquet as pq
 
 batch = next(
-    pq.ParquetFile("alonhadat-10000.parquet").iter_batches(
+    dataset.to_batches(
         batch_size=1,
         columns=["url", "crawl_date", "html"],
     )

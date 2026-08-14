@@ -52,12 +52,12 @@ def get_next_batch_start(s3_client, date_prefix: str) -> int:
     tra ve so thu tu batch tiep theo (tranh ghi de batch cu neu script
     duoc chay lai nhieu lan trong cung 1 ngay).
     """
-    prefix = f"bronze/{date_prefix}/"
+    prefix = f"test/{date_prefix}/"
     paginator = s3_client.get_paginator("list_objects_v2")
     existing_batches = set()
     for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix, Delimiter="/"):
         for cp in page.get("CommonPrefixes", []):
-            # cp['Prefix'] dang: bronze/2026-08-14/batch-3/
+            # cp['Prefix'] dang: test/2026-08-14/batch-3/
             folder = cp["Prefix"].rstrip("/").split("/")[-1]  # "batch-3"
             if folder.startswith("batch-"):
                 try:
@@ -104,8 +104,8 @@ def upload_batches(local_path: Path, rows_per_batch: int):
         local_tmp = tmp_dir / f"bronze_batch_{batch_no}.parquet"
         chunk.to_parquet(local_tmp, engine="pyarrow", compression="zstd", index=False)
 
-        s3_key_data = f"bronze/{load_date}/batch-{batch_no}/data.parquet"
-        s3_key_manifest = f"bronze/{load_date}/batch-{batch_no}/manifest.json"
+        s3_key_data = f"test/{load_date}/batch-{batch_no}/data.parquet"
+        s3_key_manifest = f"test/{load_date}/batch-{batch_no}/manifest.json"
 
         print(f"[INFO] Upload batch-{batch_no}: {len(chunk)} record -> s3://{S3_BUCKET}/{s3_key_data}")
         s3.upload_file(str(local_tmp), S3_BUCKET, s3_key_data)
@@ -133,7 +133,7 @@ def upload_batches(local_path: Path, rows_per_batch: int):
 
     print(
         f"[XONG] Da upload {n_batches} batch, tong {total_rows} record len "
-        f"s3://{S3_BUCKET}/bronze/{load_date}/"
+        f"s3://{S3_BUCKET}/test/{load_date}/"
     )
     return manifest_summary
 
