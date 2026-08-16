@@ -13,15 +13,21 @@ khong ton tai (404). Hau qua: discover_new_parts() dung ngay o lan probe DAU
 TIEN, ca crawl-run "thanh cong" ma xu ly 0 part, KHONG co canh bao gi.
 Sua: phan biet RO RANG 404 (that su khong ton tai) voi MOI loai loi khac
 (khong biet, phai bao loi ro rang bang PartCheckError).
+
+DA DON DEP (2026-08-16): bo hoan toan viec tao "<part>.parquet.manifest.json"
+tren S3 khi upload - kiem tra lai cho thay KHONG co code nao doc lai file nay
+(parse_to_staging.py chu dong bo qua no; reconcile_missing_storage_objects()
+chi kiem tra file .parquet). Toan bo noi dung cua no (part_number, source_url,
+file_size_bytes, sha256, uploaded_at, s3_key) da duoc luu THANG vao Postgres
+qua mark_success() ngay trong cung 1 lan xu ly - giu ca 2 ban la du thua,
+tang chi phi S3 API call ma khong tang do tin cay.
 """
 
 from __future__ import annotations
 
 import hashlib
 import io
-import json
 import os
-from datetime import datetime, timedelta, timezone
 
 import boto3
 import pyarrow.parquet as pq
@@ -34,7 +40,6 @@ S3_BUCKET = os.environ["S3_BRONZE_BUCKET"]
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 SOURCE_URL_TEMPLATE = "https://cdn.cuhuuhoang.com/alonhadat/part{n}.parquet"
 REQUEST_TIMEOUT_SEC = 30
-GMT7 = timezone(timedelta(hours=7))
 
 # Mot so CDN chan/tra ve khac thuong voi request KHONG co User-Agent (vi thu
 # vien requests mac dinh gui "python-requests/x.x" - de bi nhan dien la bot).
@@ -152,32 +157,23 @@ def verify_part(part_number: int, content: bytes) -> dict:
 def upload_part(part_number: int, content: bytes, *, load_date: str, crawl_no: int) -> dict:
     """
     Upload NGUYEN BYTE file goc len S3 (khong doc bang pandas/pyarrow.write lai
-    -> giu dung dinh dang/encoding tu nguon), kem manifest.json rieng cho part nay.
+    -> giu dung dinh dang/encoding tu nguon).
+
+    KHONG tao file manifest.json rieng nua (da bo - xem CHANGELOG 2026-08-16):
+    toan bo thong tin manifest cu (part_number, source_url, file_size_bytes,
+    sha256, uploaded_at, s3_key) da duoc luu THANG vao Postgres
+    (crawl.dataset_part_queue) ngay trong cung 1 lan goi mark_success() -
+    khong co code nao doc lai manifest.json tren S3, nen no chi la 1 lan
+    put_object thua, tang chi phi ma khong mang lai gia tri.
     """
     s3 = boto3.client("s3", region_name=AWS_REGION)
 
     file_name = f"part{part_number}.parquet"
     s3_key_data = f"bronze/{load_date}/crawl-{crawl_no}/{file_name}"
-    s3_key_manifest = f"bronze/{load_date}/crawl-{crawl_no}/{file_name}.manifest.json"
 
     sha256 = hashlib.sha256(content).hexdigest()
 
     s3.put_object(Bucket=S3_BUCKET, Key=s3_key_data, Body=content)
-
-    manifest = {
-        "part_number": part_number,
-        "source_url": SOURCE_URL_TEMPLATE.format(n=part_number),
-        "file_size_bytes": len(content),
-        "sha256": sha256,
-        "uploaded_at_gmt7": datetime.now(GMT7).isoformat(),
-        "s3_key": s3_key_data,
-    }
-    s3.put_object(
-        Bucket=S3_BUCKET,
-        Key=s3_key_manifest,
-        Body=json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
-        ContentType="application/json",
-    )
 
     return {"s3_key": s3_key_data, "sha256": sha256}
 

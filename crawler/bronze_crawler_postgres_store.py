@@ -138,3 +138,61 @@ class PostgresPartQueueStore:
                 "SELECT part_number, s3_key FROM crawl.dataset_part_queue WHERE status = 'success';"
             )
             return [(row[0], row[1]) for row in cur.fetchall()]
+
+
+# -----------------------------------------------------------------------------
+# Ham tien ich DUNG CHUNG cho ca 2 DAG (initial-load va periodic) de quan ly
+# vong doi 1 lan crawl (crawl.crawl_run) - tach rieng khoi cac DAG de tranh
+# lap lai SQL giong het nhau o 2 noi (kho bao tri, de lech nhau khi sua sau nay).
+# -----------------------------------------------------------------------------
+def start_crawl_run(dsn: str = DW_DSN, run_date=None) -> dict:
+    """
+    Tao 1 dong crawl_run moi. run_no tu tang theo tung ngay (crawl-1, crawl-2,
+    ... neu chay nhieu lan trong cung 1 ngay - VD khi demo, trigger tay nhieu
+    lan trong buoi). Tra ve dict {run_id, run_date, run_no}.
+    """
+    import datetime as _dt
+
+    if run_date is None:
+        run_date = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=7))).date()
+
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT COALESCE(MAX(run_no), 0) + 1 FROM crawl.crawl_run WHERE run_date = %s;",
+            (run_date,),
+        )
+        run_no = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO crawl.crawl_run (run_date, run_no, status)
+            VALUES (%s, %s, 'running')
+            RETURNING id;
+            """,
+            (run_date, run_no),
+        )
+        run_id = cur.fetchone()[0]
+        conn.commit()
+
+    return {"run_id": run_id, "run_date": str(run_date), "run_no": run_no}
+
+
+def finalize_crawl_run(run_id, success_count: int, failed_count: int, dsn: str = DW_DSN) -> str:
+    """
+    Cap nhat crawl_run voi ket qua cuoi cung. Tra ve status da ghi
+    ('completed' hoac 'completed_with_errors') de noi goi (DAG task) tu
+    quyet dinh co RAISE de bao loi hay khong (viec RAISE la trach nhiem cua
+    tung DAG, khong dat o day, vi hanh vi mong muon co the khac nhau giua
+    initial-load va periodic run).
+    """
+    status = "completed" if failed_count == 0 else "completed_with_errors"
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE crawl.crawl_run
+            SET status = %s, success_parts = %s, failed_parts = %s, finished_at = now()
+            WHERE id = %s;
+            """,
+            (status, success_count, failed_count, run_id),
+        )
+        conn.commit()
+    return status
