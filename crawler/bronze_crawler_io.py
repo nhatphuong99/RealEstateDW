@@ -180,3 +180,30 @@ def upload_part(part_number: int, content: bytes, *, load_date: str, crawl_no: i
     )
 
     return {"s3_key": s3_key_data, "sha256": sha256}
+
+
+def s3_object_exists(s3_key: str) -> bool:
+    """
+    Kiem tra 1 object co THAT SU con ton tai tren S3 khong - dung cho
+    reconcile_missing_storage_objects() trong bronze_crawler_core.py, de
+    phat hien truong hop ai do XOA FILE S3 TRUC TIEP (VD tren S3 console)
+    trong khi Postgres van con ghi status='success' cho part do.
+
+    - Object ton tai (head_object thanh cong)     -> True
+    - 404/NoSuchKey (XAC DINH RO RANG khong con)   -> False
+    - Loi khac (VD mat quyen truy cap tam thoi,
+      loi mang...)                                 -> RAISE, KHONG duoc mac
+      dinh coi la "da bi xoa" (tranh false positive lam mat cong tai lai
+      file van con nguyen, chi vi 1 loi quyen truy cap thoang qua).
+    """
+    from botocore.exceptions import ClientError
+
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    try:
+        s3.head_object(Bucket=S3_BUCKET, Key=s3_key)
+        return True
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code in ("404", "NoSuchKey"):
+            return False
+        raise

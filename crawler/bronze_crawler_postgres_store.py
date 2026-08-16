@@ -44,6 +44,11 @@ class PostgresPartQueueStore:
             cur.execute("SELECT COALESCE(MAX(part_number), 0) FROM crawl.dataset_part_queue;")
             return cur.fetchone()[0]
 
+    def get_known_part_numbers(self) -> set:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT part_number FROM crawl.dataset_part_queue;")
+            return {row[0] for row in cur.fetchall()}
+
     def insert_new_parts(self, part_numbers: list) -> None:
         if not part_numbers:
             return
@@ -126,3 +131,10 @@ class PostgresPartQueueStore:
                 (error[:2000], part_number),
             )
             conn.commit()
+
+    def list_success_parts_with_keys(self) -> list:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT part_number, s3_key FROM crawl.dataset_part_queue WHERE status = 'success';"
+            )
+            return [(row[0], row[1]) for row in cur.fetchall()]

@@ -3,8 +3,12 @@ DAG: bronze_crawl_alonhadat_dataset
 
 Muc dich: Tai du lieu tho (partN.parquet) tu CDN nguon ve S3 Bronze layer,
 tu dong resume khi crash, tu dong phat hien part MOI xuat hien (part78,
-part79, ...), va bao loi ro rang khi con part khong tai duoc sau het so lan
-retry.
+part79, ...), TU DONG QUET VA BO SUNG cac part BI THIEU O GIUA khoang da
+biet (VD: part3, part23-24, part27-29 bi thieu du da biet toi part77 - xem
+scan_and_fill_gaps() trong bronze_crawler_core.py), TU DONG DOI CHIEU voi S3
+THAT de phat hien truong hop file bi xoa THU CONG (VD tren S3 console) trong
+khi Postgres van con ghi 'success' (xem reconcile_missing_storage_objects()),
+va bao loi ro rang khi con part khong tai duoc sau het so lan retry.
 
 Cau truc S3: s3://<bucket>/bronze/<yyyy-MM-dd>/crawl-<n>/partN.parquet (+ manifest.json)
 
@@ -45,6 +49,7 @@ from bronze_crawler_io import (  # noqa: E402
     download_part,
     verify_part,
     upload_part,
+    s3_object_exists,
 )
 
 GMT7 = timezone(timedelta(hours=7))
@@ -135,6 +140,7 @@ def bronze_crawl_alonhadat_dataset():
             base_delay=2.0,
             delay_between_downloads=0.5,   # gioi han toc do nhe giua cac lan tai
             stuck_reset_minutes=30,
+            s3_object_exists_fn=s3_object_exists,  # doi chieu 'success' voi S3 that
             # === [CHI DUNG DE TEST] ===============================================
             # Bo comment dong duoi de GIOI HAN so part xu ly trong 1 lan chay DAG,
             # dung khi muon test an toan tren vai part truoc khi tha chay full
@@ -145,11 +151,12 @@ def bronze_crawl_alonhadat_dataset():
         )
 
         logger.info(
-            "Ket qua crawl: part moi phat hien=%s, da xu ly=%d, thanh cong=%d, "
-            "that bai=%d, circuit_breaker_tripped=%s, discovery_error=%s",
-            result.new_parts_discovered, len(result.processed),
-            len(result.succeeded), len(result.failed), result.circuit_breaker_tripped,
-            result.discovery_error,
+            "Ket qua crawl: DOI CHIEU S3 phat hien mat file=%s, LO HONG duoc bo sung=%s, "
+            "part MOI phat hien=%s, da xu ly=%d, thanh cong=%d, that bai=%d, "
+            "circuit_breaker_tripped=%s, discovery_error=%s, reconcile_error=%s",
+            result.reconciled_missing_parts, result.gap_parts_found, result.new_parts_discovered,
+            len(result.processed), len(result.succeeded), len(result.failed),
+            result.circuit_breaker_tripped, result.discovery_error, result.reconcile_error,
         )
 
         # Neu buoc kham pha part moi bi loi (VD: mat ket noi toi CDN) VA cung

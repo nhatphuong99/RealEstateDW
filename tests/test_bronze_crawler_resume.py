@@ -26,13 +26,18 @@ class InMemoryPartQueueStore:
     def __init__(self):
         self.parts = {}  # part_number -> dict(status=..., ...)
 
-    def seed(self, part_number, status="pending"):
+    def seed(self, part_number, status="pending", **extra_fields):
         """Ham tien ich CHI DUNG TRONG TEST de thiet lap trang thai ban dau."""
-        self.parts[part_number] = {"status": status}
+        rec = {"status": status}
+        rec.update(extra_fields)
+        self.parts[part_number] = rec
 
     # ---- Cac ham bat buoc theo interface PartQueueStore ----
     def get_max_known_part(self):
         return max(self.parts.keys(), default=0)
+
+    def get_known_part_numbers(self):
+        return set(self.parts.keys())
 
     def insert_new_parts(self, part_numbers):
         for pn in part_numbers:
@@ -67,6 +72,13 @@ class InMemoryPartQueueStore:
         rec = self.parts[part_number]
         rec["status"] = "failed"
         rec["last_error"] = error
+
+    def list_success_parts_with_keys(self):
+        return [
+            (pn, rec.get("s3_key"))
+            for pn, rec in self.parts.items()
+            if rec["status"] == "success"
+        ]
 
 
 def make_fake_cdn(available_parts: set):
@@ -287,9 +299,176 @@ def test_max_parts_per_run_gioi_han_so_part_xu_ly():
     print("PASS: test_max_parts_per_run_gioi_han_so_part_xu_ly")
 
 
+# -----------------------------------------------------------------------------
+# TEST 5: mo phong DUNG kich ban ban dua ra - nguon co LO HONG RAI RAC o giua
+# khoang DA BIET (part3, part23, part24, part27-29 bi thieu du da biet toi part30).
+# scan_and_fill_gaps() phai tu phat hien va bo sung TAT CA cac lo hong nay,
+# bat ke vi tri, khong chi o gan bien.
+# -----------------------------------------------------------------------------
+def test_gap_scan_phat_hien_va_bo_sung_part_bi_thieu_o_giua():
+    store = InMemoryPartQueueStore()
+    # Da "biet" (co trong queue) toi part 30, NHUNG cac so nay CHUA TUNG duoc
+    # dua vao queue: 3, 23, 24, 27, 28, 29 (dung theo vi du ban dua ra)
+    known_now = [1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                 17, 18, 19, 20, 21, 22, 25, 26, 30]
+    for pn in known_now:
+        store.seed(pn, status="success")  # gia lap: da tai thanh cong tu truoc
+
+    # Nguon THAT co DAY DU part 1..30 (bao gom ca cac so dang bi "thieu" trong queue)
+    part_exists_fn = make_fake_cdn(available_parts=set(range(1, 31)))
+    download_fn, download_calls = make_fake_downloader()
+    upload_fn, uploaded_store = make_fake_uploader()
+
+    result = run_crawl(
+        store=store,
+        part_exists_fn=part_exists_fn,
+        download_fn=download_fn,
+        verify_fn=fake_verify_fn,
+        upload_fn=upload_fn,
+        run_id="test-run-gap-scan",
+        sleep_fn=no_sleep,
+    )
+
+    expected_gaps = [3, 23, 24, 27, 28, 29]
+
+    assert sorted(result.gap_parts_found) == expected_gaps, \
+        f"Ky vong phat hien lo hong {expected_gaps}, thuc te {sorted(result.gap_parts_found)}"
+    assert result.new_parts_discovered == [], \
+        "Khong co part nao VUOT BIEN 30 trong test nay (nguon chi co toi 30)"
+    assert sorted(download_calls) == expected_gaps, \
+        f"Chi duoc tai DUNG cac part bi thieu, khong dong lai part da 'success', thuc te {download_calls}"
+    assert sorted(result.succeeded) == expected_gaps
+
+    for pn in expected_gaps:
+        assert store.parts[pn]["status"] == "success", f"Part {pn} phai duoc bo sung thanh cong"
+    # Cac part da 'success' tu truoc KHONG bi dong lai
+    for pn in known_now:
+        assert store.parts[pn]["status"] == "success"
+
+    print("PASS: test_gap_scan_phat_hien_va_bo_sung_part_bi_thieu_o_giua")
+
+
+# -----------------------------------------------------------------------------
+# TEST 6: discover_new_parts KHONG dung ngay khi gap 1 lo hong nho GAN BIEN -
+# ma van tim tiep duoc cac part MOI o xa hon, nho miss_tolerance.
+# -----------------------------------------------------------------------------
+def test_discover_new_parts_vuot_qua_lo_hong_nho_gan_bien():
+    store = InMemoryPartQueueStore()
+    for i in range(1, 11):
+        store.seed(i, status="success")  # da biet toi part 10
+
+    # Nguon that: part 11 BI THIEU (lo hong ngay sau bien), nhung part 12, 13
+    # van TON TAI. Neu dung logic cu (dung khi gap 1 so thieu dau tien), se
+    # KHONG BAO GIO tim thay part 12, 13.
+    part_exists_fn = make_fake_cdn(available_parts={1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13})
+    download_fn, download_calls = make_fake_downloader()
+    upload_fn, uploaded_store = make_fake_uploader()
+
+    result = run_crawl(
+        store=store,
+        part_exists_fn=part_exists_fn,
+        download_fn=download_fn,
+        verify_fn=fake_verify_fn,
+        upload_fn=upload_fn,
+        run_id="test-run-miss-tolerance",
+        sleep_fn=no_sleep,
+        miss_tolerance=5,
+    )
+
+    # Van phat hien duoc 12, 13 du part 11 bi thieu ngay truoc do
+    assert result.new_parts_discovered == [12, 13], \
+        f"Ky vong van tim thay [12,13] du part 11 thieu, thuc te {result.new_parts_discovered}"
+    assert result.succeeded == [12, 13]
+    # Part 11 KHONG duoc them vao queue (vi thuc su khong ton tai tren nguon)
+    assert 11 not in store.parts
+
+    print("PASS: test_discover_new_parts_vuot_qua_lo_hong_nho_gan_bien")
+
+
+# -----------------------------------------------------------------------------
+# TEST 7: phat hien truong hop AI DO XOA FILE TREN S3 truc tiep (khong phai
+# do crawler gay ra), trong khi Postgres van con ghi status='success'.
+# reconcile_missing_storage_objects() phai phat hien va tai lai DUNG part do.
+# -----------------------------------------------------------------------------
+def test_reconcile_phat_hien_file_bi_xoa_tren_s3():
+    store = InMemoryPartQueueStore()
+    for i in range(1, 6):
+        store.seed(i, status="success", s3_key=f"bronze/2026-08-15/crawl-1/part{i}.parquet")
+
+    # Gia lap: ai do da xoa THU CONG file cua part 3 tren S3 (VD tren console),
+    # nhung KHONG ai cap nhat lai Postgres -> Postgres van ghi 'success' sai su that.
+    deleted_s3_keys = {"bronze/2026-08-15/crawl-1/part3.parquet"}
+
+    def s3_object_exists_fn(key):
+        return key not in deleted_s3_keys
+
+    part_exists_fn = make_fake_cdn(available_parts=set(range(1, 6)))
+    download_fn, download_calls = make_fake_downloader()
+    upload_fn, uploaded_store = make_fake_uploader()
+
+    result = run_crawl(
+        store=store,
+        part_exists_fn=part_exists_fn,
+        download_fn=download_fn,
+        verify_fn=fake_verify_fn,
+        upload_fn=upload_fn,
+        s3_object_exists_fn=s3_object_exists_fn,
+        run_id="test-run-reconcile",
+        sleep_fn=no_sleep,
+    )
+
+    assert result.reconciled_missing_parts == [3], \
+        f"Ky vong phat hien [3] bi mat file S3, thuc te {result.reconciled_missing_parts}"
+    assert download_calls == [3], \
+        f"Chi duoc tai lai DUNG part 3 (khong dong lai 1,2,4,5), thuc te {download_calls}"
+    assert result.succeeded == [3]
+    assert store.parts[3]["status"] == "success"  # da duoc tai lai va thanh cong
+
+    # Cac part khac (file S3 van con nguyen) KHONG bi dong lai
+    for pn in [1, 2, 4, 5]:
+        assert pn not in download_calls
+        assert store.parts[pn]["status"] == "success"
+
+    print("PASS: test_reconcile_phat_hien_file_bi_xoa_tren_s3")
+
+
+# -----------------------------------------------------------------------------
+# TEST 8: khong truyen s3_object_exists_fn (VD: cac test khac o tren) thi
+# BO QUA hoan toan buoc reconcile, khong loi, khong anh huong hanh vi cu.
+# -----------------------------------------------------------------------------
+def test_khong_truyen_s3_object_exists_fn_thi_bo_qua_reconcile():
+    store = InMemoryPartQueueStore()
+    store.seed(1, status="success", s3_key="bronze/x/part1.parquet")
+
+    part_exists_fn = make_fake_cdn(available_parts=set())
+    download_fn, download_calls = make_fake_downloader()
+    upload_fn, uploaded_store = make_fake_uploader()
+
+    result = run_crawl(
+        store=store,
+        part_exists_fn=part_exists_fn,
+        download_fn=download_fn,
+        verify_fn=fake_verify_fn,
+        upload_fn=upload_fn,
+        # KHONG truyen s3_object_exists_fn
+        run_id="test-run-no-reconcile-fn",
+        sleep_fn=no_sleep,
+    )
+
+    assert result.reconciled_missing_parts == []
+    assert download_calls == []
+    assert store.parts[1]["status"] == "success"  # khong bi dong gi ca
+
+    print("PASS: test_khong_truyen_s3_object_exists_fn_thi_bo_qua_reconcile")
+
+
 if __name__ == "__main__":
     test_resume_khi_co_part_moi_xuat_hien()
     test_circuit_breaker_dung_som_khi_loi_lien_tiep()
     test_mot_loi_don_le_khong_chan_cac_part_sau()
     test_max_parts_per_run_gioi_han_so_part_xu_ly()
+    test_gap_scan_phat_hien_va_bo_sung_part_bi_thieu_o_giua()
+    test_discover_new_parts_vuot_qua_lo_hong_nho_gan_bien()
+    test_reconcile_phat_hien_file_bi_xoa_tren_s3()
+    test_khong_truyen_s3_object_exists_fn_thi_bo_qua_reconcile()
     print("\nTAT CA TEST DEU PASS.")
