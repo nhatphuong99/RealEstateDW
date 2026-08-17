@@ -39,6 +39,16 @@ GHI CHU: co 1 tham so `max_parts_per_run` trong ham run_crawl() duoc danh dau
 an toan qua Airflow ma khong can seed/xoa tay Postgres). Mac dinh la None
 (khong gioi han), khong anh huong hanh vi production. Xem chi tiet comment
 tai vi tri khai bao tham so nay trong ham run_crawl().
+
+BUG THUC TE DA GAP VA SUA (17/08/2026): buoc "kiem tra ton tai" (dung boi ca
+3 co che scan/discover/reconcile) truoc day KHONG duoc retry - 1 lan goi
+mang bi loi TAM THOI (VD Cloudflare tra HTTP 530 "khong ket noi duoc toi
+origin", KHONG lien quan gi den viec part do co ton tai hay khong) se lam
+that bai ngay ca crawl-run, DU hang doi hoan toan khong co gi ton dong. Da
+them retry_with_backoff cho rieng buoc kiem tra ton tai (xem _retrying_predicate,
+tham so probe_retries/probe_base_delay trong run_crawl()) - tach biet voi
+retry cua buoc TAI FILE (per_part_retries/base_delay) vi 2 loai thao tac co
+dac tinh khac nhau (kiem tra ton tai nhe & nhanh, khong can retry nhieu nhu tai file).
 """
 
 from __future__ import annotations
@@ -125,6 +135,43 @@ def retry_with_backoff(
                 delay = min(base_delay * (2 ** attempt), max_delay)
                 sleep_fn(delay)
     raise last_exc  # type: ignore[misc]
+
+
+def _retrying_predicate(
+    fn: Callable[[int], bool],
+    *,
+    retries: int,
+    base_delay: float,
+    sleep_fn: Callable[[float], None],
+) -> Callable[[int], bool]:
+    """
+    Boc 1 ham kiem tra ton tai (nhan 1 candidate, tra bool) bang
+    retry_with_backoff - de LOI HTTP TAM THOI tren 1 lan goi don le (VD
+    Cloudflare tra 530 "khong ket noi duoc toi origin", DNS timeout thoang
+    qua...) KHONG lam that bai ngay ca qua trinh discover/scan/reconcile, ma
+    duoc thu lai vai lan (delay tang dan) truoc khi thuc su bao loi.
+
+    BUG THUC TE DA GAP (16/08/2026): discover_new_parts() probe candidate
+    (VD part 78) gap Cloudflare 530 (loi ha tang tam thoi, KHONG lien quan
+    gi den viec part 78 co ton tai hay khong) -> truoc day loi nay lan truyen
+    NGAY LAP TUC ra ngoai (khong retry) -> ca crawl-run that bai chi vi 1 lan
+    goi mang bi trung dung luc mang chap chon, du hang doi hoan toan khong co
+    gi ton dong. Them retry o DIEM GOI thay vi o tung ham rieng le
+    (part_exists_on_source/s3_object_exists) de giu bronze_crawler_io.py la
+    IO THUAN TUY, khong tu quyet dinh chinh sach retry (nhat quan voi cach
+    download_fn cung duoc boc retry o run_crawl(), khong tu retry ben trong).
+
+    LUU Y: neu fn(candidate) tra ve False THAT (khong phai raise loi), day la
+    1 CAU TRA LOI HOP LE (candidate khong ton tai) - retry_with_backoff chi
+    bat Exception, gia tri False duoc tra thang ra ngay lan goi dau, KHONG bi
+    retry oan uong.
+    """
+    def wrapped(candidate: int) -> bool:
+        return retry_with_backoff(
+            lambda: fn(candidate), retries=retries, base_delay=base_delay, sleep_fn=sleep_fn,
+        )
+
+    return wrapped
 
 
 # -----------------------------------------------------------------------------
@@ -288,6 +335,8 @@ def run_crawl(
     miss_tolerance: int = 5,
     s3_object_exists_fn: Optional[Callable[[str], bool]] = None,
     reconcile_enabled: bool = True,
+    probe_retries: int = 2,       # so lan retry rieng cho BUOC KIEM TRA TON TAI (nhe hon download)
+    probe_base_delay: float = 1.0,
     # === [CHI DUNG DE TEST] ===================================================
     # Gioi han SO PART TOI DA xu ly trong 1 lan goi run_crawl(), bat ke queue
     # con bao nhieu part 'pending'/'failed'. Muc dich: test an toan qua Airflow
@@ -328,10 +377,24 @@ def run_crawl(
 
     store.reset_stuck_downloading(stuck_reset_minutes)
 
-    if reconcile_enabled and s3_object_exists_fn is not None:
+    # Boc retry cho CA 2 ham kiem tra ton tai - ap dung 1 lan duy nhat o day,
+    # dung chung cho ca 3 co che ben duoi (reconcile/gap-scan/discover), thay
+    # vi phai sua rieng tung ham. Xem docstring _retrying_predicate() de biet
+    # ly do (bug Cloudflare 530 thuc te da gap).
+    resilient_part_exists_fn = _retrying_predicate(
+        part_exists_fn, retries=probe_retries, base_delay=probe_base_delay, sleep_fn=sleep_fn,
+    )
+    resilient_s3_object_exists_fn = (
+        _retrying_predicate(
+            s3_object_exists_fn, retries=probe_retries, base_delay=probe_base_delay, sleep_fn=sleep_fn,
+        )
+        if s3_object_exists_fn is not None else None
+    )
+
+    if reconcile_enabled and resilient_s3_object_exists_fn is not None:
         try:
             result.reconciled_missing_parts = reconcile_missing_storage_objects(
-                store, s3_object_exists_fn
+                store, resilient_s3_object_exists_fn
             )
         except Exception as e:  # noqa: BLE001
             # Loi doi chieu storage (VD: mat quyen truy cap S3 tam thoi) KHONG
@@ -340,7 +403,7 @@ def run_crawl(
 
     if gap_scan_enabled:
         try:
-            result.gap_parts_found = scan_and_fill_gaps(store, part_exists_fn)
+            result.gap_parts_found = scan_and_fill_gaps(store, resilient_part_exists_fn)
         except Exception as e:  # noqa: BLE001
             # Loi quet gap KHONG duoc lam dung ca crawl - ghi nhan va tiep tuc,
             # vi day la co che "tu chua lanh" chay dinh ky, lan sau se thu lai.
@@ -348,7 +411,9 @@ def run_crawl(
 
     max_known = store.get_max_known_part()
     try:
-        new_parts = discover_new_parts(max_known, part_exists_fn, miss_tolerance=miss_tolerance)
+        new_parts = discover_new_parts(
+            max_known, resilient_part_exists_fn, miss_tolerance=miss_tolerance
+        )
         if new_parts:
             store.insert_new_parts(new_parts)
         result.new_parts_discovered = new_parts

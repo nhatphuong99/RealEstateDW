@@ -88,6 +88,29 @@ def make_fake_cdn(available_parts: set):
     return part_exists_fn
 
 
+def make_flaky_part_exists_fn(available_parts: set, fail_first_n_calls_for: dict):
+    """
+    Gia lap CDN CHAP CHON (mo phong loi Cloudflare 530 tam thoi thuc te da
+    gap): voi 1 so candidate cu the, N LAN GOI DAU se raise loi, tu lan goi
+    thu N+1 tro di moi tra ve ket qua that (co ton tai hay khong).
+
+    fail_first_n_calls_for: dict {candidate: so_lan_loi_truoc_khi_tra_ket_qua_that}
+    Tra kem call_counts (dict) de test co the kiem tra so lan da goi thuc te.
+    """
+    call_counts = {}
+
+    def fn(pn):
+        fails_needed = fail_first_n_calls_for.get(pn, 0)
+        call_counts[pn] = call_counts.get(pn, 0) + 1
+        if call_counts[pn] <= fails_needed:
+            raise RuntimeError(
+                f"gia lap loi Cloudflare 530 tam thoi cho part {pn} (lan goi {call_counts[pn]})"
+            )
+        return pn in available_parts
+
+    return fn, call_counts
+
+
 def make_fake_downloader(fail_parts: set = frozenset()):
     """
     Gia lap tai file. fail_parts la tap part_number se LUON loi (dung de test
@@ -462,6 +485,81 @@ def test_khong_truyen_s3_object_exists_fn_thi_bo_qua_reconcile():
     print("PASS: test_khong_truyen_s3_object_exists_fn_thi_bo_qua_reconcile")
 
 
+# -----------------------------------------------------------------------------
+# TEST 9: loi CHOP CHOAP/tam thoi (VD Cloudflare 530) khi probe 1 candidate
+# -> retry noi bo TU PHUC HOI, KHONG lam that bai ca crawl-run.
+# Day chinh la bug thuc te da gap ngay 17/08/2026 (xem CHANGELOG trong
+# bronze_crawler_core.py, ham _retrying_predicate).
+# -----------------------------------------------------------------------------
+def test_discover_new_parts_tu_phuc_hoi_sau_loi_tam_thoi():
+    store = InMemoryPartQueueStore()
+    for i in range(1, 51):
+        store.seed(i, status="success")  # hang doi da "xong" toan bo 1-50
+
+    # part 51, 52 THAT SU ton tai, nhung candidate 51 se loi 1 lan truoc khi
+    # tra ket qua that (mo phong 1 lan trung Cloudflare 530 thoang qua)
+    flaky_fn, call_counts = make_flaky_part_exists_fn(
+        available_parts=set(range(1, 53)),
+        fail_first_n_calls_for={51: 1},
+    )
+    download_fn, download_calls = make_fake_downloader()
+    upload_fn, uploaded_store = make_fake_uploader()
+
+    result = run_crawl(
+        store=store,
+        part_exists_fn=flaky_fn,
+        download_fn=download_fn,
+        verify_fn=fake_verify_fn,
+        upload_fn=upload_fn,
+        run_id="test-run-flaky",
+        sleep_fn=no_sleep,
+    )
+
+    assert result.discovery_error is None, \
+        f"KHONG duoc co discovery_error vi da tu phuc hoi qua retry, thuc te: {result.discovery_error}"
+    assert result.new_parts_discovered == [51, 52], result.new_parts_discovered
+    assert result.succeeded == [51, 52]
+    assert call_counts[51] == 2, \
+        f"Ky vong candidate 51 duoc goi 2 lan (1 loi + 1 thanh cong), thuc te {call_counts[51]}"
+
+    print("PASS: test_discover_new_parts_tu_phuc_hoi_sau_loi_tam_thoi")
+
+
+# -----------------------------------------------------------------------------
+# TEST 10: loi KEO DAI (khong tu phuc hoi du da retry) -> van phai bao loi
+# ro rang qua discovery_error, KHONG duoc am tham "thanh cong" voi 0 part.
+# -----------------------------------------------------------------------------
+def test_discovery_error_khi_loi_keo_dai():
+    store = InMemoryPartQueueStore()
+    for i in range(1, 51):
+        store.seed(i, status="success")  # hang doi da "xong", KHONG co backlog
+
+    def always_fails_fn(pn):
+        raise RuntimeError("gia lap loi Cloudflare 530 KEO DAI, khong tu phuc hoi")
+
+    download_fn, download_calls = make_fake_downloader()
+    upload_fn, uploaded_store = make_fake_uploader()
+
+    result = run_crawl(
+        store=store,
+        part_exists_fn=always_fails_fn,
+        download_fn=download_fn,
+        verify_fn=fake_verify_fn,
+        upload_fn=upload_fn,
+        run_id="test-run-persistent-fail",
+        sleep_fn=no_sleep,
+        probe_retries=2,
+    )
+
+    assert result.discovery_error is not None
+    assert "discover_new_parts_error" in result.discovery_error
+    assert result.new_parts_discovered == []
+    assert result.processed == [], "Khong co backlog tu truoc nen khong co gi de xu ly"
+    assert download_calls == []
+
+    print("PASS: test_discovery_error_khi_loi_keo_dai")
+
+
 if __name__ == "__main__":
     test_resume_khi_co_part_moi_xuat_hien()
     test_circuit_breaker_dung_som_khi_loi_lien_tiep()
@@ -471,4 +569,6 @@ if __name__ == "__main__":
     test_discover_new_parts_vuot_qua_lo_hong_nho_gan_bien()
     test_reconcile_phat_hien_file_bi_xoa_tren_s3()
     test_khong_truyen_s3_object_exists_fn_thi_bo_qua_reconcile()
+    test_discover_new_parts_tu_phuc_hoi_sau_loi_tam_thoi()
+    test_discovery_error_khi_loi_keo_dai()
     print("\nTAT CA TEST DEU PASS.")
