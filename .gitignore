@@ -171,3 +171,9 @@ pnpm-debug.log*
 
 ### Docs
 docs/
+error_log.md
+
+### Tests
+crawler/tests/
+pytest.ini
+tests/

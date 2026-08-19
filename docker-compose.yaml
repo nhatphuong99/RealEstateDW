@@ -95,6 +95,7 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
     - ${AIRFLOW_PROJ_DIR:-.}/crawler:/opt/airflow/crawler
+    - ${AIRFLOW_PROJ_DIR:-.}/scripts:/opt/airflow/scripts
   user: "${AIRFLOW_UID:-50000}:0"
   networks:
     - real-estate-network

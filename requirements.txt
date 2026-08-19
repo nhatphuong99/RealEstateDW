@@ -20,4 +20,8 @@ boto3==1.43.66
 # --- Database ---
 psycopg2-binary>=2.9
 
+# --- Testing ---
+pytest
 
+# --- Other ---
+tzdata
