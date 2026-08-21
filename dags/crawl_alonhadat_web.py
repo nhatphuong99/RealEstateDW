@@ -28,7 +28,7 @@ from crawler.bronze_crawler_io import run_dag2
 
 default_args = {
     "owner": "phuong",
-    "retries": 2,
+    "retries": 1,
     "retry_delay": timedelta(minutes=5),
     # Không retry_exponential_backoff — 429/CAPTCHA thường không tự hết
     # trong vài phút, cố định 5 phút đơn giản và đủ dùng cho quy mô đồ án.
@@ -40,7 +40,7 @@ with DAG(
     schedule="@hourly",
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Ho_Chi_Minh"),
     catchup=False,           # không chạy bù các giờ đã qua khi mới bật DAG
-    max_active_runs=1,       # concurrency luôn = 1 (mục 7) — KHÔNG cho 2 run hourly chồng nhau
+    max_active_runs=1,       # concurrency luôn = 1 — KHÔNG cho 2 run hourly chồng nhau
     default_args=default_args,
     tags=["bronze", "crawler", "alonhadat", "dag2"],
 ) as dag:
@@ -50,8 +50,4 @@ with DAG(
         # Truyền run_id của chính DAG run vào crawler -> crawl.run_state.run_id
         # khớp trực tiếp với Airflow UI, dễ truy vết khi debug.
         op_kwargs={"run_id": "{{ run_id }}"},
-        # TODO (bonus, chưa làm — xem mục 9 tài liệu thiết kế): thêm
-        # on_failure_callback gửi email khi task FAILED (cần cấu hình SMTP
-        # trong airflow.cfg trước). Baseline hiện tại: xem crawl.run_state
-        # hoặc log task này trong Airflow UI khi task đỏ.
     )

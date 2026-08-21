@@ -15,13 +15,16 @@ logic thuần khỏi I/O thật.
 VỀ PROXY: dùng thẳng `proxy_manager.ProxyPool` (đã implement đúng Protocol
 `ProxyPool` của core: current/rotate/mark_failed) — xem `build_proxy_pool_from_env()`
 bên dưới. `SimpleProxyPool` tạm thời trước đây ĐÃ BỊ XOÁ khỏi file này.
+
+VỀ CẤU HÌNH: mọi tham số (timeout, DSN, bucket, ...) đọc qua `crawler/config.py`
+— KHÔNG tự đọc `os.environ` rải rác trong file này nữa (trừ `run_dag2`
+đọc `run_id` là tham số hàm, không phải cấu hình môi trường).
 """
 
 from __future__ import annotations
 
 import io
 import logging
-import os
 import random
 import time
 from dataclasses import dataclass
@@ -39,11 +42,14 @@ import requests
 from crawler.bronze_crawler_core import (
     BronzeCrawlerCore,
     BronzeRecord,
+    CrawlerConfig,
     DetailTask,
     FetchResult,
     ListingTask,
+    RunResult,
     StopReason,
 )
+from crawler import config
 from crawler.proxy_manager import ProxyPool
 
 logger = logging.getLogger("bronze_crawler_io")
@@ -292,19 +298,18 @@ class PsycopgControlPlaneRepo:
 # 3. Page fetcher (requests) — B4/B9/B10
 # ============================================================
 
-@dataclass(frozen=True)
-class RequestsFetcherConfig:
-    connect_timeout_seconds: float = 10.0
-    read_timeout_seconds: float = 30.0
-
-
 class RequestsPageFetcher:
     """Implement Protocol PageFetcher bằng `requests`. KHÔNG BAO GIỜ raise
     exception ra ngoài — mọi lỗi kỹ thuật (timeout, connect-fail, DNS...)
     được bọc vào FetchResult.error để core tự phân loại (classify_fetch_result)."""
 
-    def __init__(self, config: RequestsFetcherConfig = RequestsFetcherConfig()) -> None:
-        self._config = config
+    def __init__(
+        self,
+        connect_timeout: float = config.CONNECT_TIMEOUT_SECONDS,
+        read_timeout: float = config.READ_TIMEOUT_SECONDS,
+    ) -> None:
+        self._connect_timeout = connect_timeout
+        self._read_timeout = read_timeout
 
     def fetch(self, url: str, proxy_url: Optional[str]):
         headers = {
@@ -318,29 +323,29 @@ class RequestsPageFetcher:
                 url,
                 headers=headers,
                 proxies=proxies,
-                timeout=(self._config.connect_timeout_seconds, self._config.read_timeout_seconds),
+                timeout=(self._connect_timeout, self._read_timeout),
             )
-        except requests.exceptions.ConnectionError as exc:
-            # ProxyError / SSLError / ConnectTimeout đều là ConnectionError —
-            # dấu hiệu RÕ RÀNG proxy chết (không tunnel/handshake được), khác
-            # bản chất với timeout đọc response thông thường. Xác nhận từ log
-            # thực tế 2026-08-19: retry mù cùng 1 proxy chết 3 lần là vô ích
-            # -> đánh dấu is_proxy_error để core đổi proxy ngay (B12), không
-            # đi qua nhánh retry-cùng-proxy (B11).
-            logger.warning("Proxy lỗi kết nối url=%s proxy=%s: %s", url, proxy_url, exc)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            # Gộp 2 nhóm lỗi CHƯA BAO GIỜ nhận được response hợp lệ:
+            #   - ConnectionError: ProxyError/SSLError/ConnectTimeout — proxy
+            #     không tunnel/handshake được (xác nhận log thực tế 2026-08-19).
+            #   - Timeout (bao gồm ReadTimeout) — proxy CÓ connect được nhưng
+            #     treo tới hết timeout, dấu hiệu kinh điển của proxy free quá
+            #     tải/băng thông kém (cũng xác nhận từ log thực tế cùng ngày:
+            #     "Read timed out" lặp lại nhiều lần trên cùng 1 proxy).
+            # Cả 2 đều coi là "proxy này không dùng được" -> đổi proxy NGAY
+            # (B12) thay vì retry mù cùng 1 proxy nhiều khả năng vẫn tệ (B11).
+            logger.warning("Proxy lỗi/treo url=%s proxy=%s: %s", url, proxy_url, exc)
             return FetchResult(status_code=None, error=str(exc), is_proxy_error=True)
         except requests.exceptions.RequestException as exc:
-            # ReadTimeout và các lỗi kỹ thuật khác — proxy đã connect được,
-            # chỉ là chờ phản hồi lâu (có thể do site chậm, chưa chắc do
-            # proxy) -> vẫn giữ B11 (retry cùng proxy trước khi bỏ cuộc).
+            # Các lỗi request khác không liên quan trực tiếp tới proxy (VD
+            # TooManyRedirects, InvalidURL) -> vẫn giữ B11 (retry cùng proxy).
             logger.warning("Fetch lỗi kỹ thuật url=%s proxy=%s: %s", url, proxy_url, exc)
             return FetchResult(status_code=None, error=str(exc))
 
-        retry_after = response.headers.get("Retry-After")
         return FetchResult(
             status_code=response.status_code,
             html=response.text,
-            retry_after_seconds=int(retry_after) if retry_after and retry_after.isdigit() else None,
         )
 
 
@@ -423,27 +428,66 @@ class S3ParquetBufferWriter:
             logger.info("Rename hoàn tất -> s3://%s/%s", self._bucket, final_key)
         return final_key
 
+    # -------- Dọn .inprogress mồ côi (quyết định 2026-08-19) --------
+    #
+    # Cơ chế dọn TỰ ĐỘNG (gọi ở đầu mỗi run qua
+    # run_dag2()) làm lưới an toàn — phòng khi worker bị kill giữa lúc
+    # copy_object() đã xong nhưng delete_object() chưa kịp chạy.
+
+    def list_orphaned_inprogress(self, prefix: str = "bronze/") -> list[str]:
+        """Liệt kê (KHÔNG xoá) mọi key `.parquet.inprogress` đã có key
+        final (không đuôi `.inprogress`) tương ứng — an toàn tuyệt đối để
+        xoá, KHÔNG BAO GIỜ đụng tới `.inprogress` chưa có bản final (có
+        thể là run đang dở dang thật)."""
+        paginator = self._s3.get_paginator("list_objects_v2")
+        all_keys: set[str] = set()
+        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                all_keys.add(obj["Key"])
+
+        return sorted(
+            key for key in all_keys
+            if key.endswith(".parquet.inprogress") and key[: -len(".inprogress")] in all_keys
+        )
+
+    def cleanup_orphaned_inprogress(self, prefix: str = "bronze/") -> int:
+        """Xoá thật các `.inprogress` mồ côi tìm được qua
+        `list_orphaned_inprogress()`. KHÔNG BAO GIỜ raise — đây là bước
+        dọn dẹp hygiene, lỗi (VD IAM tạm thời trục trặc) chỉ log warning,
+        không được phép chặn crawl chính."""
+        try:
+            orphaned = self.list_orphaned_inprogress(prefix)
+        except Exception as exc:  # noqa: BLE001 - cố ý bắt rộng, không được chặn crawl chính
+            logger.warning("Không liệt kê được .inprogress mồ côi (bỏ qua): %s", exc)
+            return 0
+
+        deleted = 0
+        for key in orphaned:
+            try:
+                self._s3.delete_object(Bucket=self._bucket, Key=key)
+                deleted += 1
+                logger.info("Đã dọn .inprogress mồ côi: %s", key)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Không xoá được %s (bỏ qua, thử lại ở run sau): %s", key, exc)
+
+        if deleted:
+            logger.info("Dọn dẹp đầu run: đã xoá %d file .inprogress mồ côi", deleted)
+        return deleted
+
 
 # ============================================================
 # 5. Factory — lắp ráp core từ biến môi trường (.env)
 # ============================================================
 
 def build_repo_from_env() -> PsycopgControlPlaneRepo:
-    """DSN ưu tiên POSTGRES_DW_DSN (bên trong container Airflow); fallback
-    POSTGRES_DW_DSN_LOCAL khi chạy ngoài Docker (VD chạy script tay trên host)."""
-    dsn = os.environ.get("POSTGRES_DW_DSN") or os.environ.get("POSTGRES_DW_DSN_LOCAL")
-    if not dsn:
-        raise RuntimeError(
-            "Thiếu POSTGRES_DW_DSN / POSTGRES_DW_DSN_LOCAL trong biến môi trường."
-        )
-    return PsycopgControlPlaneRepo(dsn)
+    """DSN lấy qua `config.get_postgres_dsn()` — tự chọn đúng DSN theo
+    ngữ cảnh đang chạy (trong/ngoài container Airflow), xem giải thích
+    trong crawler/config.py."""
+    return PsycopgControlPlaneRepo(config.get_postgres_dsn())
 
 
 def build_buffer_from_env() -> S3ParquetBufferWriter:
-    bucket = os.environ.get("S3_BRONZE_BUCKET")
-    if not bucket:
-        raise RuntimeError("Thiếu S3_BRONZE_BUCKET trong biến môi trường.")
-    return S3ParquetBufferWriter(bucket=bucket)
+    return S3ParquetBufferWriter(bucket=config.get_s3_bucket())
 
 
 def build_proxy_pool_from_env(auto_refill: bool = True) -> ProxyPool:
@@ -461,10 +505,10 @@ def build_proxy_pool_from_env(auto_refill: bool = True) -> ProxyPool:
 # 6. Wiring — điểm gọi DUY NHẤT cho PythonOperator (dags/crawl_alonhadat_web.py)
 # ============================================================
 
-# stop_reason thuộc nhóm này = "hoàn thành bình thường" (task Airflow SUCCESS).
-# Ngoài nhóm này (fetch_error/blocked/proxy_exhausted) = bất thường -> raise
-# để Airflow đánh dấu task FAILED, kích hoạt retry theo default_args, và mở
-# đường cho email alert bonus sau này (xem mục 9 tài liệu thiết kế).
+# stop_reason thuộc nhóm này = "hoàn thành bình thường" (task Airflow SUCCESS)
+# BẤT KỂ số trang crawl được. Ngoài nhóm này (fetch_error/proxy_exhausted)
+# vẫn được tính THÀNH CÔNG nếu đã crawl đủ config.CRAWLER_MIN_SUCCESS_PAGES
+# trước khi dừng (quyết định 2026-08-19) — xem is_success() bên dưới.
 NORMAL_STOP_REASONS = frozenset({
     StopReason.MAX_PAGES,
     StopReason.TIME_BOX,
@@ -472,39 +516,79 @@ NORMAL_STOP_REASONS = frozenset({
 })
 
 
+def is_success(result: RunResult) -> bool:
+    """1 run được coi là THÀNH CÔNG nếu:
+      - stop_reason thuộc NORMAL_STOP_REASONS (hoàn thành bình thường), HOẶC
+      - đã crawl đủ `CRAWLER_MIN_SUCCESS_PAGES` trang chi tiết trước khi
+        dừng, DÙ stop_reason bất thường (fetch_error/proxy_exhausted) —
+        quyết định 2026-08-19: có dữ liệu đủ dùng thì không đáng để Airflow
+        retry lại từ đầu (retry chỉ tốn thêm 1 vòng refill() + crawl lại
+        những gì gần như chắc chắn đã có trong queue) hoặc báo fail giả."""
+    if result.stop_reason in NORMAL_STOP_REASONS:
+        return True
+    return result.detail_pages_done >= config.CRAWLER_MIN_SUCCESS_PAGES
+
+
 def run_dag2(run_id: Optional[str] = None) -> str:
     """Điểm gọi DUY NHẤT cho PythonOperator của DAG 2. Lắp ráp toàn bộ
     factory (repo/proxy_pool/buffer/fetcher/clock) thành 1 BronzeCrawlerCore,
-    chạy 1 lần, LUÔN đóng kết nối Postgres (finally) dù thành công hay lỗi.
+    dọn `.inprogress` mồ côi còn sót từ run trước (nếu có), chạy 1 lần,
+    LUÔN đóng kết nối Postgres (finally) dù thành công hay lỗi.
 
     `run_id`: nếu không truyền, tự sinh theo timestamp HCMC. Khi gọi từ
     Airflow nên truyền `{{ run_id }}` (run_id của chính DAG run) qua
     `op_kwargs` để dễ truy vết `crawl.run_state` <-> Airflow UI.
 
-    Raise RuntimeError nếu stop_reason KHÔNG thuộc NORMAL_STOP_REASONS —
-    để Airflow coi task là FAILED (xem NORMAL_STOP_REASONS ở trên)."""
+    Raise RuntimeError nếu `is_success()` trả False — để Airflow coi task
+    là FAILED (kích hoạt retry theo default_args)."""
     if not run_id:
         run_id = f"web-{datetime.now(HCM_TZ):%Y%m%dT%H%M%S}"
 
     repo = build_repo_from_env()
     try:
+        buffer = build_buffer_from_env()
+        buffer.cleanup_orphaned_inprogress()  # dọn rác từ (các) run trước, nếu có — xem mục lưu ý ở class
+
         core = BronzeCrawlerCore(
             repo=repo,
             proxy_pool=build_proxy_pool_from_env(),
             fetcher=RequestsPageFetcher(),
-            buffer=build_buffer_from_env(),
+            buffer=buffer,
             clock=SystemClock(),
+            config=CrawlerConfig(
+                max_detail_pages_per_run=config.CRAWLER_MAX_DETAIL_PAGES_PER_RUN,
+                time_box_seconds=config.CRAWLER_TIME_BOX_SECONDS,
+                delay_min_seconds=config.CRAWLER_DELAY_MIN_SECONDS,
+                delay_max_seconds=config.CRAWLER_DELAY_MAX_SECONDS,
+                max_fetch_error_retries=config.CRAWLER_MAX_FETCH_ERROR_RETRIES,
+                flush_interval_seconds=config.CRAWLER_FLUSH_INTERVAL_SECONDS,
+                flush_page_threshold=config.CRAWLER_FLUSH_PAGE_THRESHOLD,
+                min_success_pages=config.CRAWLER_MIN_SUCCESS_PAGES,
+            ),
         )
-        stop_reason = core.run(run_id)
+        result = core.run(run_id)
     finally:
         repo.close()
 
-    logger.info("DAG2 run_id=%s kết thúc với stop_reason=%s", run_id, stop_reason.value)
+    logger.info(
+        "DAG2 run_id=%s kết thúc: stop_reason=%s, detail_pages_done=%d",
+        run_id, result.stop_reason.value, result.detail_pages_done,
+    )
 
-    if stop_reason not in NORMAL_STOP_REASONS:
+    if not is_success(result):
         raise RuntimeError(
-            f"DAG2 run_id={run_id} dừng bất thường: stop_reason={stop_reason.value}. "
+            f"DAG2 run_id={run_id} thất bại: stop_reason={result.stop_reason.value}, "
+            f"chỉ crawl được {result.detail_pages_done} trang (< "
+            f"{config.CRAWLER_MIN_SUCCESS_PAGES} trang tối thiểu). "
             f"Chi tiết: bảng crawl.run_state hoặc log task phía trên."
         )
 
-    return stop_reason.value
+    if result.stop_reason not in NORMAL_STOP_REASONS:
+        logger.info(
+            "DAG2 run_id=%s: stop_reason bất thường (%s) nhưng đã crawl đủ "
+            "%d trang (>= %d) -> VẪN TÍNH LÀ THÀNH CÔNG.",
+            run_id, result.stop_reason.value, result.detail_pages_done,
+            config.CRAWLER_MIN_SUCCESS_PAGES,
+        )
+
+    return result.stop_reason.value

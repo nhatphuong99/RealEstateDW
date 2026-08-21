@@ -48,8 +48,8 @@ PROPERTY_TYPES: tuple[str, ...] = (
 # Cần cập nhật lại danh sách này khi gặp CAPTCHA thật lần đầu khi crawl.
 CAPTCHA_MARKERS: tuple[str, ...] = (
     "captcha",
-    "xác minh bạn không phải",
-    "verify you are human",
+    "Tôi không phải người máy",
+    "xác minh",
 )
 
 
@@ -69,34 +69,69 @@ class CrawlerConfig:
 
     max_detail_pages_per_run: int = 1000   # tính theo trang CHI TIẾT (mục 7)
     time_box_seconds: int = 45 * 60         # ~45 phút, tránh đè lên run hourly kế tiếp
-    delay_min_seconds: float = 5.0          # xem cảnh báo ở đầu file
+    delay_min_seconds: float = 5.0          # đã dùng proxy hỗ trợ (quyết định 2026-08-19)
     delay_max_seconds: float = 10.0
-    max_fetch_error_retries: int = 3        # B11: retry CÙNG proxy (lỗi kỹ thuật chung)
-    max_blocked_proxy_rotations: int = 3    # B12: đổi tối đa 3 proxy khi bị 429/CAPTCHA (site chặn thật)
-    max_dead_proxy_rotations: int = 8       # đổi tối đa 8 proxy khi PROXY CHẾT (ProxyError) — ngân
-                                             # sách cao hơn blocked vì tỷ lệ proxy free chết là BÌNH
-                                             # THƯỜNG (~90%+), không phải hiện tượng hiếm như bị site chặn
+    # Ngân sách retry CÙNG 1 proxy, chỉ áp dụng cho FETCH_ERROR (lỗi mạng/
+    # server chung chung). Hết ngân sách -> DỪNG RUN NGAY (quyết định
+    # 2026-08-19, bản rút gọn cuối cùng — không còn "ân hạn rồi đổi proxy"
+    # như phương án trước). PROXY_ISSUE (proxy chết/429/CAPTCHA) KHÔNG có
+    # ngân sách riêng — đổi proxy ngay, lặp tới khi hết proxy trong pool.
+    max_fetch_error_retries: int = 3
     flush_interval_seconds: int = 10 * 60   # B13: 10 phút
     flush_page_threshold: int = 100         # B13: ~100 trang chi tiết
+    # Ngưỡng "đủ dữ liệu để coi là thành công" (quyết định 2026-08-19):
+    #   1. Ngay khi đạt đủ số trang này lần đầu, flush SỚM lên S3 (không
+    #      đợi đủ flush_interval_seconds/flush_page_threshold như bình
+    #      thường) — bảo vệ dữ liệu sớm nếu run bị dừng bất thường ngay sau đó.
+    #   2. run_dag2() (bronze_crawler_io.py) dùng lại đúng ngưỡng này để
+    #      quyết định: dừng bất thường (FETCH_ERROR/PROXY_EXHAUSTED) nhưng
+    #      đã đạt đủ số trang -> vẫn tính là THÀNH CÔNG (không raise).
+    min_success_pages: int = 10
 
 
 class StopReason(str, Enum):
-    """Lý do dừng 1 run của DAG 2 — ghi vào run_state.stopped_reason."""
+    """Lý do dừng 1 run của DAG 2 — ghi vào run_state.stopped_reason.
+
+    Quyết định 2026-08-19 (bản rút gọn cuối cùng):
+      - FETCH_ERROR: hết ngân sách retry cùng proxy cho lỗi mạng/server ->
+        DỪNG RUN NGAY (không đổi proxy nữa).
+      - PROXY_EXHAUSTED: hết proxy trong pool (kể cả sau khi đã thử
+        refill() 1 lần) khi đang xử lý PROXY_ISSUE (chết/treo/429/CAPTCHA).
+    Cả 2 đều có thể VẪN được `run_dag2()` (bronze_crawler_io.py) coi là
+    THÀNH CÔNG nếu đã crawl đủ `min_success_pages` trước khi dừng — xem
+    RunResult và mục 9 tài liệu thiết kế."""
 
     MAX_PAGES = "max_pages"
     TIME_BOX = "time_box"
     NO_MORE_DATA = "no_more_data"
     FETCH_ERROR = "fetch_error"
-    BLOCKED = "blocked"
     PROXY_EXHAUSTED = "proxy_exhausted"
 
 
 class ErrorKind(str, Enum):
-    """Phân loại kết quả fetch — quyết định retry cùng proxy hay đổi proxy."""
+    """Phân loại kết quả fetch — quyết định retry cùng proxy hay đổi proxy
+    NGAY (quyết định 2026-08-19, bản rút gọn cuối cùng):
+      - PROXY_ISSUE: lỗi liên quan tới BẢN THÂN proxy (chết/treo/quá tải)
+        HOẶC site chủ động chặn (429/CAPTCHA) -> đổi proxy NGAY, không
+        retry cùng proxy, lặp tới khi hết proxy trong pool.
+      - FETCH_ERROR: lỗi mạng/server chung chung, KHÔNG rõ do proxy hay do
+        site (VD 5xx, lỗi request lạ) -> retry CÙNG proxy tối đa
+        `max_fetch_error_retries` lần; hết lượt vẫn lỗi -> DỪNG RUN NGAY
+        (StopReason.FETCH_ERROR), KHÔNG đổi proxy để thử tiếp nữa."""
 
     OK = "ok"
-    FETCH_ERROR = "fetch_error"   # timeout / connect-fail / 5xx thường (B11)
-    BLOCKED = "blocked"            # 429 hoặc CAPTCHA, gộp chung (B12)
+    FETCH_ERROR = "fetch_error"
+    PROXY_ISSUE = "proxy_issue"
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """Kết quả trả về của `BronzeCrawlerCore.run()` — kèm số trang đã
+    crawl được để `run_dag2()` quyết định có coi là thành công hay không
+    dù `stop_reason` bất thường (xem `min_success_pages`)."""
+
+    stop_reason: StopReason
+    detail_pages_done: int
 
 
 @dataclass(frozen=True)
@@ -125,11 +160,12 @@ class FetchResult:
     status_code: Optional[int]                  # None nếu timeout/connect-fail
     html: Optional[str] = None
     error: Optional[str] = None                  # mô tả lỗi kỹ thuật, nếu có
-    retry_after_seconds: Optional[int] = None     # header Retry-After, nếu có
-    is_proxy_error: bool = False                  # True nếu lỗi RÕ RÀNG do proxy chết
-    # (ProxyError/SSLError/ConnectTimeout — không tunnel/handshake được qua
-    # proxy) — phát hiện từ log thực tế 2026-08-19: retry mù cùng 1 proxy
-    # chắc chắn hỏng 3 lần là vô ích, cần đổi proxy ngay (xem classify_fetch_result).
+    is_proxy_error: bool = False                  # True nếu lỗi RÕ RÀNG do bản thân proxy
+    # (ProxyError/SSLError/ConnectTimeout — không tunnel/handshake được;
+    # HOẶC ReadTimeout — proxy treo tới hết timeout, dấu hiệu quá tải/băng
+    # thông kém) — phát hiện từ log thực tế 2026-08-19: cả 2 nhóm lỗi này
+    # đều là "bản chất proxy", đổi proxy ngay thay vì retry mù cùng 1 proxy
+    # (xem classify_fetch_result -> ErrorKind.PROXY_DEAD).
 
 
 @dataclass
@@ -190,34 +226,30 @@ def detect_captcha(html: str) -> bool:
 
 
 def classify_fetch_result(result: FetchResult) -> ErrorKind:
-    """Phân loại kết quả fetch theo B9-B11:
-    - Lỗi RÕ RÀNG do proxy chết (`is_proxy_error=True`: ProxyError/SSLError/
-      ConnectTimeout — không tunnel/handshake qua proxy được) -> BLOCKED
-      NGAY, coi như đổi proxy y hệt 429/CAPTCHA. KHÔNG retry mù cùng 1 proxy
-      chắc chắn hỏng (phát hiện từ log thực tế 2026-08-19 — proxy free chết
-      giữa chừng rất phổ biến, retry 3 lần cùng proxy chết là vô ích).
-    - Không có response nhưng KHÔNG rõ do proxy (VD ReadTimeout — proxy đã
-      connect được, chỉ là chờ phản hồi lâu, có thể do site chậm) hoặc 5xx
-      không do rate-limit -> FETCH_ERROR (retry cùng proxy, B11).
-    - 429, hoặc HTML chứa dấu hiệu CAPTCHA (status vẫn 200) -> BLOCKED
-      (đổi proxy).
+    """Phân loại kết quả fetch (quyết định 2026-08-19):
+    - Lỗi RÕ RÀNG do bản thân proxy (`is_proxy_error=True`: chết/treo/quá
+      tải), HOẶC 429, HOẶC HTML chứa dấu hiệu CAPTCHA (status vẫn 200) ->
+      PROXY_ISSUE — gộp chung 1 nhóm "liên quan tới proxy", xử lý giống
+      hệt nhau: đổi proxy NGAY, không retry cùng proxy.
+    - Không có response và KHÔNG rõ do proxy (lỗi request lạ khác), hoặc
+      5xx -> FETCH_ERROR — lỗi mạng/server chung chung, retry CÙNG proxy
+      trước (B11) rồi mới đổi proxy nếu vẫn không được.
     - 2xx và không phải CAPTCHA -> OK.
-    - 4xx khác (VD 404 tin đã gỡ) -> coi là FETCH_ERROR kỹ thuật, không
-      phải do bị chặn, không nên tốn lượt đổi proxy."""
+    - 4xx khác (VD 404 tin đã gỡ) -> FETCH_ERROR, không phải do bị chặn."""
     if result.is_proxy_error:
-        return ErrorKind.BLOCKED
+        return ErrorKind.PROXY_ISSUE
 
     if result.error is not None or result.status_code is None:
         return ErrorKind.FETCH_ERROR
 
     if result.status_code == 429:
-        return ErrorKind.BLOCKED
+        return ErrorKind.PROXY_ISSUE
 
     if result.status_code >= 500:
         return ErrorKind.FETCH_ERROR
 
     if result.html is not None and detect_captcha(result.html):
-        return ErrorKind.BLOCKED
+        return ErrorKind.PROXY_ISSUE
 
     if 200 <= result.status_code < 300:
         return ErrorKind.OK
@@ -327,8 +359,10 @@ class BronzeCrawlerCore:
 
     # -------- entrypoint gọi từ Airflow PythonOperator --------
 
-    def run(self, run_id: str) -> StopReason:
-        """Chạy 1 lần trigger DAG 2, trả về lý do dừng để ghi vào run_state."""
+    def run(self, run_id: str) -> RunResult:
+        """Chạy 1 lần trigger DAG 2, trả về RunResult (lý do dừng + số
+        trang đã crawl) để ghi vào run_state và để run_dag2() quyết định
+        thành công/thất bại."""
         today = self.clock.now().date()
 
         self.repo.apply_daily_reset_if_needed(today)
@@ -339,6 +373,7 @@ class BronzeCrawlerCore:
         last_flush_monotonic = start_monotonic
         detail_pages_done = 0
         pages_since_flush = 0
+        early_flush_done = False  # đã flush sớm khi đạt min_success_pages lần đầu chưa
 
         stop_reason: Optional[StopReason] = None
 
@@ -370,20 +405,33 @@ class BronzeCrawlerCore:
 
             self._sleep_between_requests()
 
-            # Flush định kỳ — độc lập với nhánh detail/listing ở trên (B13)
-            since_flush = self.clock.monotonic() - last_flush_monotonic
-            if (
-                since_flush >= self.config.flush_interval_seconds
-                or pages_since_flush >= self.config.flush_page_threshold
-            ):
+            if not early_flush_done and detail_pages_done >= self.config.min_success_pages:
+                # Flush SỚM ngay khi vừa đạt đủ min_success_pages lần đầu —
+                # không đợi flush_interval_seconds/flush_page_threshold như
+                # bình thường, để bảo vệ dữ liệu ngay nếu run bị dừng bất
+                # thường ngay sau đó (quyết định 2026-08-19).
                 self.buffer.flush(run_id, today, final=False)
                 last_flush_monotonic = self.clock.monotonic()
                 pages_since_flush = 0
+                early_flush_done = True
+            else:
+                # Flush định kỳ bình thường — độc lập với nhánh detail/listing (B13)
+                since_flush = self.clock.monotonic() - last_flush_monotonic
+                if (
+                    since_flush >= self.config.flush_interval_seconds
+                    or pages_since_flush >= self.config.flush_page_threshold
+                ):
+                    self.buffer.flush(run_id, today, final=False)
+                    last_flush_monotonic = self.clock.monotonic()
+                    pages_since_flush = 0
 
-        # Kết thúc run (bất kể lý do dừng nào) — flush lần cuối + rename (B14)
+        # Kết thúc run (bất kể lý do dừng nào) — flush lần cuối + rename (B14).
+        # Luôn chạy dù stop_reason bất thường -> toàn bộ trang đã crawl từ
+        # đầu run tới giờ được lưu đầy đủ và đánh dấu hoàn thiện (không còn
+        # .inprogress), đúng yêu cầu "lưu lại toàn bộ đã crawl được".
         output_key = self.buffer.flush(run_id, today, final=True)
         self.repo.finalize_run_state(run_id, stop_reason, detail_pages_done, output_key)
-        return stop_reason
+        return RunResult(stop_reason=stop_reason, detail_pages_done=detail_pages_done)
 
     # -------- xử lý 1 trang chi tiết --------
 
@@ -433,14 +481,21 @@ class BronzeCrawlerCore:
         có thể tiếp tục vòng lặp chính; khác None nghĩa là phải dừng run
         ngay, không xử lý task hiện tại.
 
+        LUẬT RETRY (quyết định 2026-08-19 — bản rút gọn cuối cùng):
+          - PROXY_ISSUE (proxy chết/treo/429/CAPTCHA): đổi proxy NGAY,
+            KHÔNG retry cùng proxy, lặp tới khi HẾT PROXY trong pool
+            (PROXY_EXHAUSTED).
+          - FETCH_ERROR (mạng/server chung chung, không rõ do proxy):
+            retry CÙNG proxy tối đa `max_fetch_error_retries` lần; hết
+            lượt vẫn lỗi -> DỪNG RUN NGAY (FETCH_ERROR), KHÔNG đổi proxy
+            để thử tiếp — khác PROXY_ISSUE.
+
         QUY TẮC PROXY (quyết định 2026-08-18): KHÔNG BAO GIỜ được gọi
         fetcher với proxy=None (tức chạy bằng IP thật) — mỗi khi pool cạn
-        (`current()` trả None ngay từ đầu, hoặc `rotate()` hết proxy hợp lệ
-        sau khi bị blocked), thử `refill()` ĐÚNG 1 LẦN. Nếu refill() lấy
-        được proxy mới -> tiếp tục fetch bình thường với proxy mới. Nếu
-        refill() vẫn không có gì -> dừng run ngay (PROXY_EXHAUSTED)."""
-        fetch_error_attempts = 0
-        blocked_proxy_attempts = 0
+        (`current()` trả None ngay từ đầu, hoặc `rotate()` hết proxy hợp lệ),
+        thử `refill()` ĐÚNG 1 LẦN cho lượt gọi này. Có proxy mới -> tiếp
+        tục. Vẫn không có gì -> dừng run ngay (PROXY_EXHAUSTED)."""
+        same_proxy_attempts = 0
         already_refilled = False  # chỉ refill 1 lần cho mỗi lần cạn trong lượt gọi này
 
         while True:
@@ -454,6 +509,7 @@ class BronzeCrawlerCore:
                         stop_reason,
                     )
                 already_refilled = True
+                same_proxy_attempts = 0
                 continue  # vừa refill() thành công -> lấy proxy mới ở vòng lặp kế
 
             result = self.fetcher.fetch(url, proxy)
@@ -463,18 +519,15 @@ class BronzeCrawlerCore:
                 return result, None
 
             if kind is ErrorKind.FETCH_ERROR:
-                fetch_error_attempts += 1
-                if fetch_error_attempts >= self.config.max_fetch_error_retries:
-                    return result, StopReason.FETCH_ERROR
-                # B11: lỗi kỹ thuật -> retry CÙNG proxy, không rotate
-                continue
+                same_proxy_attempts += 1
+                if same_proxy_attempts < self.config.max_fetch_error_retries:
+                    continue  # còn lượt -> retry CÙNG proxy
+                # Hết ngân sách retry cùng proxy -> DỪNG RUN NGAY, không đổi proxy
+                return result, StopReason.FETCH_ERROR
 
-            # kind is ErrorKind.BLOCKED (429 hoặc CAPTCHA)
+            # kind is ErrorKind.PROXY_ISSUE (proxy chết/treo/429/CAPTCHA)
             self.proxy_pool.mark_failed(proxy)
-
-            blocked_proxy_attempts += 1
-            if blocked_proxy_attempts >= self.config.max_blocked_proxy_rotations:
-                return result, StopReason.BLOCKED
+            same_proxy_attempts = 0
 
             new_proxy = self.proxy_pool.rotate()
             if new_proxy is None:
@@ -482,7 +535,7 @@ class BronzeCrawlerCore:
                 if stop_reason is not None:
                     return result, stop_reason
                 already_refilled = True
-            # B12: retry CÙNG URL bằng proxy mới (từ rotate() hoặc từ refill()) -> lặp lại vòng while
+            # lặp lại vòng while với proxy mới (từ rotate() hoặc từ refill())
 
     def _handle_pool_exhausted(self, already_refilled: bool) -> Optional[StopReason]:
         """Gọi khi pool hết proxy hợp lệ (current()==None hoặc rotate()

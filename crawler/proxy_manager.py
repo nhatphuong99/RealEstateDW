@@ -7,10 +7,11 @@ health-check song song qua httpbin.org/ip, `ProxyPool` round-robin có
 khai báo trong bronze_crawler_core.py (current/rotate/mark_failed) nên
 cắm thẳng vào `BronzeCrawlerCore` mà không cần sửa core/io.
 
-KHÔNG persist proxy xuống DB: proxy free
+KHÔNG persist proxy xuống DB — đúng key learning đã ghi nhận: proxy free
 chết quá nhanh để đáng lưu, quản lý hoàn toàn trong bộ nhớ.
 
-API proxy:
+Đã xác nhận API thật (18/08/2026, qua docs.proxyscrape.com và test trực
+tiếp — xem chi tiết trong hội thoại):
     - ProxyScrape v4: request=getproxies&protocol=http&proxy_format=protocolipport&format=text
       (tài liệu chính thức: https://docs.proxyscrape.com/api-reference/public-api/get-proxy-list)
       Lưu ý: filter protocol=http không được API tôn trọng tuyệt đối
@@ -24,10 +25,13 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import requests
+
+from crawler import config
 
 logger = logging.getLogger("proxy_manager")
 
@@ -117,14 +121,21 @@ def fetch_from_geonode(timeout: float = 15.0, limit: int = 100) -> list[str]:
 # ============================================================
 
 def health_check_one(proxy_url: str, timeout: float = 6.0) -> bool:
-    """Kiểm tra 1 proxy còn sống bằng cách gọi httpbin.org/ip qua proxy đó."""
+    """Kiểm tra 1 proxy còn sống VÀ đủ nhanh — timeout ngắn (mặc định lấy
+    từ ProxyConfig) tự đóng vai trò bộ lọc chất lượng: proxy quá tải/băng
+    thông kém sẽ không kịp trả lời trong timeout dù "còn sống" về bản chất."""
+    start = time.monotonic()
     try:
         response = requests.get(
             HEALTH_CHECK_URL,
             proxies={"http": proxy_url, "https": proxy_url},
             timeout=timeout,
         )
-        return response.status_code == 200
+        elapsed = time.monotonic() - start
+        alive = response.status_code == 200
+        if alive:
+            logger.debug("Proxy %s sống, phản hồi sau %.2fs", proxy_url, elapsed)
+        return alive
     except requests.exceptions.RequestException:
         return False
 
@@ -155,9 +166,15 @@ def health_check_parallel(
     return alive
 
 
-def fetch_fresh_proxies(max_candidates: int = 200, health_check_workers: int = 20) -> list[str]:
+def fetch_fresh_proxies(
+    max_candidates: int = config.PROXY_MAX_CANDIDATES,
+    health_check_workers: int = config.PROXY_HEALTH_CHECK_WORKERS,
+    health_check_timeout: float = config.PROXY_HEALTH_CHECK_TIMEOUT_SECONDS,
+) -> list[str]:
     """Lấy proxy mới từ cả 2 nguồn, gộp + dedup (giữ thứ tự), health-check
-    song song, trả về danh sách proxy ĐÃ XÁC NHẬN còn sống."""
+    song song, trả về danh sách proxy ĐÃ XÁC NHẬN còn sống VÀ đủ nhanh
+    (timeout health-check ngắn — xem crawler/config.py — tự loại proxy quá
+    tải/băng thông kém dù vẫn "sống" về mặt kỹ thuật)."""
     proxyscrape_proxies = fetch_from_proxyscrape()
     geonode_proxies = fetch_from_geonode()
 
@@ -165,10 +182,11 @@ def fetch_fresh_proxies(max_candidates: int = 200, health_check_workers: int = 2
     candidates = combined[:max_candidates]
 
     logger.info(
-        "Thu được %d proxy thô (ProxyScrape=%d, GeoNode=%d) -> health-check %d proxy",
+        "Thu được %d proxy thô (ProxyScrape=%d, GeoNode=%d) -> health-check %d proxy (timeout=%.1fs)",
         len(combined), len(proxyscrape_proxies), len(geonode_proxies), len(candidates),
+        health_check_timeout,
     )
-    return health_check_parallel(candidates, max_workers=health_check_workers)
+    return health_check_parallel(candidates, max_workers=health_check_workers, timeout=health_check_timeout)
 
 
 # ============================================================
@@ -228,13 +246,16 @@ class ProxyPool:
 
     # -------- Mutation riêng, orchestrator (DAG) tự gọi --------
 
-    def refill(self, max_candidates: int = 200, health_check_workers: int = 20) -> int:
+    def refill(
+        self,
+        max_candidates: int = config.PROXY_MAX_CANDIDATES,
+        health_check_workers: int = config.PROXY_HEALTH_CHECK_WORKERS,
+        health_check_timeout: float = config.PROXY_HEALTH_CHECK_TIMEOUT_SECONDS,
+    ) -> int:
         """Fetch + health-check proxy MỚI, THAY HOÀN TOÀN danh sách hiện
         tại (bỏ luôn danh sách failed cũ — proxy mới chưa từng thất bại).
-        Trả về số proxy sống lấy được."""
-        fresh = fetch_fresh_proxies(
-            max_candidates=max_candidates, health_check_workers=health_check_workers
-        )
+        Trả về số proxy sống (và đủ nhanh) lấy được."""
+        fresh = fetch_fresh_proxies(max_candidates, health_check_workers, health_check_timeout)
         with self._lock:
             self._proxies = fresh
             self._failed = set()
