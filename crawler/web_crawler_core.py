@@ -1,12 +1,12 @@
 """
-crawler/bronze_crawler_core.py
+crawler/web_crawler_core.py
 
 Logic THUẦN Python (không thực hiện I/O thật) cho vòng lặp crawl chính của
 DAG 2 (`crawl_alonhadat_web`). Toàn bộ tương tác DB / HTTP / S3 / Proxy được
 inject qua các Protocol (Dependency Injection) — nhờ vậy có thể unit test
 bằng fake/mock, không cần Airflow, Postgres hay mạng thật.
 
-I/O thật (DB/S3/HTTP/Proxy) nằm ở module riêng: crawler/bronze_crawler_io.py
+I/O thật (DB/S3/HTTP/Proxy) nằm ở module riêng: crawler/web_crawler_io.py
 
 Tài liệu tham chiếu thiết kế: tong_hop_boi_canh_crawler_alonhadat.md
   - Mục 5: schema bảng crawl.listing_progress / detail_queue / proxy_pool / run_state
@@ -83,7 +83,7 @@ class CrawlerConfig:
     #   1. Ngay khi đạt đủ số trang này lần đầu, flush SỚM lên S3 (không
     #      đợi đủ flush_interval_seconds/flush_page_threshold như bình
     #      thường) — bảo vệ dữ liệu sớm nếu run bị dừng bất thường ngay sau đó.
-    #   2. run_dag2() (bronze_crawler_io.py) dùng lại đúng ngưỡng này để
+    #   2. run_dag2() (web_crawler_io.py) dùng lại đúng ngưỡng này để
     #      quyết định: dừng bất thường (FETCH_ERROR/PROXY_EXHAUSTED) nhưng
     #      đã đạt đủ số trang -> vẫn tính là THÀNH CÔNG (không raise).
     min_success_pages: int = 10
@@ -97,7 +97,7 @@ class StopReason(str, Enum):
         DỪNG RUN NGAY (không đổi proxy nữa).
       - PROXY_EXHAUSTED: hết proxy trong pool (kể cả sau khi đã thử
         refill() 1 lần) khi đang xử lý PROXY_ISSUE (chết/treo/429/CAPTCHA).
-    Cả 2 đều có thể VẪN được `run_dag2()` (bronze_crawler_io.py) coi là
+    Cả 2 đều có thể VẪN được `run_dag2()` (web_crawler_io.py) coi là
     THÀNH CÔNG nếu đã crawl đủ `min_success_pages` trước khi dừng — xem
     RunResult và mục 9 tài liệu thiết kế."""
 
@@ -154,7 +154,7 @@ class DetailTask:
 
 @dataclass(frozen=True)
 class FetchResult:
-    """Kết quả 1 lần gọi HTTP — do bronze_crawler_io.py tạo ra rồi truyền
+    """Kết quả 1 lần gọi HTTP — do web_crawler_io.py tạo ra rồi truyền
     vào core. Core KHÔNG tự gọi HTTP, chỉ phân loại kết quả."""
 
     status_code: Optional[int]                  # None nếu timeout/connect-fail
@@ -259,7 +259,7 @@ def classify_fetch_result(result: FetchResult) -> ErrorKind:
 
 # ============================================================
 # 4. Protocol (interface) cho các thành phần I/O thật
-#    -> implement ở bronze_crawler_io.py, ở đây chỉ cần fake để test.
+#    -> implement ở web_crawler_io.py, ở đây chỉ cần fake để test.
 # ============================================================
 
 class ControlPlaneRepo(Protocol):

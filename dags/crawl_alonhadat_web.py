@@ -6,11 +6,11 @@ crawl.listing_progress / crawl.detail_queue (mục 5, 6 tài liệu thiết kế
 
 File này CHỈ khai báo lịch chạy/retry cho Airflow — toàn bộ logic nghiệp
 vụ nằm ở:
-    - crawler/bronze_crawler_core.py  (logic thuần, không I/O)
-    - crawler/bronze_crawler_io.py    (I/O thật: Postgres/HTTP/S3/Proxy)
+    - crawler/web_crawler_core.py  (logic thuần, không I/O)
+    - crawler/web_crawler_io.py    (I/O thật: Postgres/HTTP/S3/Proxy)
     - crawler/proxy_manager.py        (fetch + health-check proxy)
 
-`run_dag2()` (trong bronze_crawler_io.py) là điểm gọi DUY NHẤT — lắp ráp
+`run_dag2()` (trong web_crawler_io.py) là điểm gọi DUY NHẤT — lắp ráp
 mọi factory, chạy 1 lần, tự raise RuntimeError nếu stop_reason bất thường
 (fetch_error/blocked/proxy_exhausted) để Airflow đánh dấu task FAILED và
 kích hoạt retry bên dưới.
@@ -24,7 +24,7 @@ import pendulum
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 
-from crawler.bronze_crawler_io import run_dag2
+from crawler.web_crawler_io import run_dag2
 
 default_args = {
     "owner": "phuong",

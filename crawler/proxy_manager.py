@@ -4,7 +4,7 @@ crawler/proxy_manager.py
 Quản lý proxy động cho crawler: fetch từ ProxyScrape v4 + GeoNode,
 health-check song song qua httpbin.org/ip, `ProxyPool` round-robin có
 `refill()` khi cần bổ sung. `ProxyPool` implement ĐÚNG Protocol `ProxyPool`
-khai báo trong bronze_crawler_core.py (current/rotate/mark_failed) nên
+khai báo trong web_crawler_core.py (current/rotate/mark_failed) nên
 cắm thẳng vào `BronzeCrawlerCore` mà không cần sửa core/io.
 
 KHÔNG persist proxy xuống DB — đúng key learning đã ghi nhận: proxy free
@@ -197,9 +197,9 @@ class ProxyPool:
     """Quản lý pool proxy trong bộ nhớ (KHÔNG persist DB — key learning:
     proxy free chết quá nhanh để đáng lưu).
 
-    Implement ĐÚNG Protocol `ProxyPool` trong bronze_crawler_core.py
+    Implement ĐÚNG Protocol `ProxyPool` trong web_crawler_core.py
     (`current`/`rotate`/`mark_failed`) — cắm thẳng vào `BronzeCrawlerCore`
-    được, thay cho `SimpleProxyPool` tạm thời trong bronze_crawler_io.py.
+    được, thay cho `SimpleProxyPool` tạm thời trong web_crawler_io.py.
 
     `refill()` là method RIÊNG, core KHÔNG gọi tới — orchestrator (DAG) tự
     gọi khi cần bổ sung proxy mới (VD đầu mỗi run, hoặc khi pool cạn hẳn

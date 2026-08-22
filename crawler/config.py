@@ -5,8 +5,8 @@ Cấu hình dùng chung cho toàn bộ crawler. Đọc biến môi trường t�
 (python-dotenv) để không hard-code credentials, đúng nguyên tắc bảo mật
 đã đặt ra từ GĐ2 của đồ án.
 
-Mọi module khác (bronze_crawler_io.py, proxy_manager.py, dags/...) import
-từ đây thay vì tự đọc `os.environ` rải rác. `bronze_crawler_core.py` (logic
+Mọi module khác (web_crawler_io.py, proxy_manager.py, dags/...) import
+từ đây thay vì tự đọc `os.environ` rải rác. `web_crawler_core.py` (logic
 thuần, không I/O) KHÔNG import module này — core chỉ nhận `CrawlerConfig`
 đã dựng sẵn qua tham số, giữ đúng nguyên tắc tách biệt logic khỏi I/O.
 """
@@ -117,3 +117,21 @@ CRAWLER_FLUSH_PAGE_THRESHOLD = _int("CRAWLER_FLUSH_PAGE_THRESHOLD", 100)
 # run_dag2() coi 1 run dừng bất thường (fetch_error/proxy_exhausted) vẫn
 # là THÀNH CÔNG nếu đã kịp crawl đủ số trang này trước khi dừng.
 CRAWLER_MIN_SUCCESS_PAGES = _int("CRAWLER_MIN_SUCCESS_PAGES", 10)
+
+
+# ---------------------------------------------------------------------
+# Nhóm A — DAG 1 (bronze_load_dataset / dataset_loader_core.py)
+# ---------------------------------------------------------------------
+# Không cần biến DATASET_TOTAL_PARTS ở đây — con số 77 part là hằng số
+# NGHIỆP VỤ cố định (CDN đã xác nhận), không phải tham số môi trường có
+# thể thay đổi giữa các lần chạy -> để nguyên trong dataset_loader_core.py
+# (TOTAL_PARTS), tránh khai báo trùng 2 nơi.
+DATASET_CDN_BASE_URL = os.getenv(
+    "DATASET_CDN_BASE_URL", "https://cdn.cuhuuhoang.com/alonhadat"
+)
+DATASET_S3_PREFIX = os.getenv("DATASET_S3_PREFIX", "bronze/dataset/")
+# Probe (GET Range: bytes=0-0) chỉ cần 1 byte đầu -> timeout ngắn.
+DATASET_PROBE_TIMEOUT_SECONDS = _float("DATASET_PROBE_TIMEOUT_SECONDS", 10.0)
+# Download full file (part lớn nhất ~10.000 dòng) -> timeout dài hơn để
+# chịu được mạng chậm tới CDN, khác hẳn timeout ngắn của DAG 2 (trang HTML nhỏ).
+DATASET_DOWNLOAD_TIMEOUT_SECONDS = _float("DATASET_DOWNLOAD_TIMEOUT_SECONDS", 60.0)

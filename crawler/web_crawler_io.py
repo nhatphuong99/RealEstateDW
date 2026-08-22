@@ -1,14 +1,14 @@
 """
-crawler/bronze_crawler_io.py
+crawler/web_crawler_io.py
 
-Implement THẬT các Protocol khai báo trong bronze_crawler_core.py:
+Implement THẬT các Protocol khai báo trong web_crawler_core.py:
     - PsycopgControlPlaneRepo -> crawl.listing_progress / detail_queue / run_state (psycopg2)
     - RequestsPageFetcher     -> HTTP GET qua proxy (requests)
     - S3ParquetBufferWriter   -> buffer tích luỹ + flush S3 (boto3 + pyarrow)
     - SystemClock             -> thời gian thật, múi giờ Asia/Ho_Chi_Minh
     - run_dag2()              -> hàm wiring DUY NHẤT mà dags/crawl_alonhadat_web.py gọi
 
-Core (bronze_crawler_core.py) hoàn toàn không biết đến module này — mọi
+Core (web_crawler_core.py) hoàn toàn không biết đến module này — mọi
 import psycopg2/boto3/requests CHỈ nằm ở đây, đúng nguyên tắc tách biệt
 logic thuần khỏi I/O thật.
 
@@ -39,7 +39,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 
-from crawler.bronze_crawler_core import (
+from crawler.web_crawler_core import (
     BronzeCrawlerCore,
     BronzeRecord,
     CrawlerConfig,
@@ -52,7 +52,7 @@ from crawler.bronze_crawler_core import (
 from crawler import config
 from crawler.proxy_manager import ProxyPool
 
-logger = logging.getLogger("bronze_crawler_io")
+logger = logging.getLogger("web_crawler_io")
 
 HCM_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
@@ -103,7 +103,7 @@ PROPERTY_TYPES = (
 
 class PsycopgControlPlaneRepo:
     """Implement Protocol ControlPlaneRepo bằng psycopg2, thao tác schema
-    `crawl` trong `postgres-dw` (DDL: sql/002_crawl_schema.sql).
+    `crawl` trong `postgres-dw` (DDL: sql/001_crawl_schema.sql).
 
     Dùng `autocommit=True`: mỗi method là 1 statement SQL độc lập (kể cả
     claim pattern UPDATE...RETURNING vốn đã atomic trong 1 statement nhờ
