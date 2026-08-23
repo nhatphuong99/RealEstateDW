@@ -126,7 +126,7 @@ class ErrorKind(str, Enum):
 
 @dataclass(frozen=True)
 class RunResult:
-    """Kết quả trả về của `BronzeCrawlerCore.run()` — kèm số trang đã
+    """Kết quả trả về của `WebCrawlerCore.run()` — kèm số trang đã
     crawl được để `run_dag2()` quyết định có coi là thành công hay không
     dù `stop_reason` bất thường (xem `min_success_pages`)."""
 
@@ -332,7 +332,7 @@ class Clock(Protocol):
 # 5. Core orchestrator
 # ============================================================
 
-class BronzeCrawlerCore:
+class WebCrawlerCore:
     """Điều phối vòng lặp chính của DAG 2 (mục 6 trong tài liệu thiết kế).
 
     KHÔNG tự tạo kết nối DB/HTTP/S3 — mọi phụ thuộc được inject qua

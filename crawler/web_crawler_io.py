@@ -6,7 +6,7 @@ Implement THẬT các Protocol khai báo trong web_crawler_core.py:
     - RequestsPageFetcher     -> HTTP GET qua proxy (requests)
     - S3ParquetBufferWriter   -> buffer tích luỹ + flush S3 (boto3 + pyarrow)
     - SystemClock             -> thời gian thật, múi giờ Asia/Ho_Chi_Minh
-    - run_dag2()              -> hàm wiring DUY NHẤT mà dags/crawl_alonhadat_web.py gọi
+    - run_dag2()              -> hàm wiring DUY NHẤT mà dags/web_crawler.py gọi
 
 Core (web_crawler_core.py) hoàn toàn không biết đến module này — mọi
 import psycopg2/boto3/requests CHỈ nằm ở đây, đúng nguyên tắc tách biệt
@@ -40,7 +40,7 @@ import pyarrow.parquet as pq
 import requests
 
 from crawler.web_crawler_core import (
-    BronzeCrawlerCore,
+    WebCrawlerCore,
     BronzeRecord,
     CrawlerConfig,
     DetailTask,
@@ -502,12 +502,12 @@ def build_proxy_pool_from_env(auto_refill: bool = True) -> ProxyPool:
 
 
 # ============================================================
-# 6. Wiring — điểm gọi DUY NHẤT cho PythonOperator (dags/crawl_alonhadat_web.py)
+# 6. Wiring — điểm gọi DUY NHẤT cho PythonOperator (dags/web_crawler.py)
 # ============================================================
 
 # stop_reason thuộc nhóm này = "hoàn thành bình thường" (task Airflow SUCCESS)
 # BẤT KỂ số trang crawl được. Ngoài nhóm này (fetch_error/proxy_exhausted)
-# vẫn được tính THÀNH CÔNG nếu đã crawl đủ config.CRAWLER_MIN_SUCCESS_PAGES
+# vẫn được tính THÀNH CÔNG nếu đã crawl đủ config.WEB_CRAWLER_MIN_SUCCESS_PAGES
 # trước khi dừng (quyết định 2026-08-19) — xem is_success() bên dưới.
 NORMAL_STOP_REASONS = frozenset({
     StopReason.MAX_PAGES,
@@ -519,19 +519,19 @@ NORMAL_STOP_REASONS = frozenset({
 def is_success(result: RunResult) -> bool:
     """1 run được coi là THÀNH CÔNG nếu:
       - stop_reason thuộc NORMAL_STOP_REASONS (hoàn thành bình thường), HOẶC
-      - đã crawl đủ `CRAWLER_MIN_SUCCESS_PAGES` trang chi tiết trước khi
+      - đã crawl đủ `WEB_CRAWLER_MIN_SUCCESS_PAGES` trang chi tiết trước khi
         dừng, DÙ stop_reason bất thường (fetch_error/proxy_exhausted) —
         quyết định 2026-08-19: có dữ liệu đủ dùng thì không đáng để Airflow
         retry lại từ đầu (retry chỉ tốn thêm 1 vòng refill() + crawl lại
         những gì gần như chắc chắn đã có trong queue) hoặc báo fail giả."""
     if result.stop_reason in NORMAL_STOP_REASONS:
         return True
-    return result.detail_pages_done >= config.CRAWLER_MIN_SUCCESS_PAGES
+    return result.detail_pages_done >= config.WEB_CRAWLER_MIN_SUCCESS_PAGES
 
 
 def run_dag2(run_id: Optional[str] = None) -> str:
     """Điểm gọi DUY NHẤT cho PythonOperator của DAG 2. Lắp ráp toàn bộ
-    factory (repo/proxy_pool/buffer/fetcher/clock) thành 1 BronzeCrawlerCore,
+    factory (repo/proxy_pool/buffer/fetcher/clock) thành 1 WebCrawlerCore,
     dọn `.inprogress` mồ côi còn sót từ run trước (nếu có), chạy 1 lần,
     LUÔN đóng kết nối Postgres (finally) dù thành công hay lỗi.
 
@@ -549,21 +549,21 @@ def run_dag2(run_id: Optional[str] = None) -> str:
         buffer = build_buffer_from_env()
         buffer.cleanup_orphaned_inprogress()  # dọn rác từ (các) run trước, nếu có — xem mục lưu ý ở class
 
-        core = BronzeCrawlerCore(
+        core = WebCrawlerCore(
             repo=repo,
             proxy_pool=build_proxy_pool_from_env(),
             fetcher=RequestsPageFetcher(),
             buffer=buffer,
             clock=SystemClock(),
             config=CrawlerConfig(
-                max_detail_pages_per_run=config.CRAWLER_MAX_DETAIL_PAGES_PER_RUN,
-                time_box_seconds=config.CRAWLER_TIME_BOX_SECONDS,
-                delay_min_seconds=config.CRAWLER_DELAY_MIN_SECONDS,
-                delay_max_seconds=config.CRAWLER_DELAY_MAX_SECONDS,
-                max_fetch_error_retries=config.CRAWLER_MAX_FETCH_ERROR_RETRIES,
-                flush_interval_seconds=config.CRAWLER_FLUSH_INTERVAL_SECONDS,
-                flush_page_threshold=config.CRAWLER_FLUSH_PAGE_THRESHOLD,
-                min_success_pages=config.CRAWLER_MIN_SUCCESS_PAGES,
+                max_detail_pages_per_run=config.WEB_CRAWLER_MAX_DETAIL_PAGES_PER_RUN,
+                time_box_seconds=config.WEB_CRAWLER_TIME_BOX_SECONDS,
+                delay_min_seconds=config.WEB_CRAWLER_DELAY_MIN_SECONDS,
+                delay_max_seconds=config.WEB_CRAWLER_DELAY_MAX_SECONDS,
+                max_fetch_error_retries=config.WEB_CRAWLER_MAX_FETCH_ERROR_RETRIES,
+                flush_interval_seconds=config.WEB_CRAWLER_FLUSH_INTERVAL_SECONDS,
+                flush_page_threshold=config.WEB_CRAWLER_FLUSH_PAGE_THRESHOLD,
+                min_success_pages=config.WEB_CRAWLER_MIN_SUCCESS_PAGES,
             ),
         )
         result = core.run(run_id)
@@ -579,7 +579,7 @@ def run_dag2(run_id: Optional[str] = None) -> str:
         raise RuntimeError(
             f"DAG2 run_id={run_id} thất bại: stop_reason={result.stop_reason.value}, "
             f"chỉ crawl được {result.detail_pages_done} trang (< "
-            f"{config.CRAWLER_MIN_SUCCESS_PAGES} trang tối thiểu). "
+            f"{config.WEB_CRAWLER_MIN_SUCCESS_PAGES} trang tối thiểu). "
             f"Chi tiết: bảng crawl.run_state hoặc log task phía trên."
         )
 
@@ -588,7 +588,7 @@ def run_dag2(run_id: Optional[str] = None) -> str:
             "DAG2 run_id=%s: stop_reason bất thường (%s) nhưng đã crawl đủ "
             "%d trang (>= %d) -> VẪN TÍNH LÀ THÀNH CÔNG.",
             run_id, result.stop_reason.value, result.detail_pages_done,
-            config.CRAWLER_MIN_SUCCESS_PAGES,
+            config.WEB_CRAWLER_MIN_SUCCESS_PAGES,
         )
 
     return result.stop_reason.value

@@ -1,5 +1,5 @@
 """
-dags/bronze_load_dataset.py
+dags/dataset_loader.py
 
 DAG 1 — tải 77 part cố định (part1..part77.parquet) từ CDN dataset lên S3
 (Bronze layer), theo control-plane crawl.dataset_part_state.
@@ -11,7 +11,7 @@ vụ nằm ở:
 
 Dùng TaskFlow API (`@task`/`.expand()`) áp thẳng lên 2 hàm đã có sẵn trong
 dataset_loader_io.py — KHÔNG viết thêm hàm bọc, giữ đúng nguyên tắc DAG
-file chỉ wiring, không chứa logic nghiệp vụ (giống crawl_alonhadat_web.py
+file chỉ wiring, không chứa logic nghiệp vụ (giống web_crawler.py
 bên Nhóm B).
 
 Task 2 (`process_one_part`) là dynamic-mapped: mỗi part cần xử lý là 1
@@ -44,7 +44,7 @@ default_args = {
 }
 
 with DAG(
-    dag_id="bronze_load_dataset",
+    dag_id="dataset_loader",
     description="DAG 1 - tai 77 part co dinh tu CDN dataset len S3 (dataset_part_state)",
     schedule=None,             # chạy tay — dataset CDN cố định, không có lịch định kỳ
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Ho_Chi_Minh"),
@@ -58,7 +58,9 @@ with DAG(
     compute_parts = task(task_id="compute_parts_to_process")(compute_parts_to_process_task)
 
     # Task 2 (mapped) — 1 Task Instance / part, chạy song song tối đa 5
-    # cùng lúc (lịch sự với CDN, tránh mở 77 connection đồng thời).
+    # cùng lúc (giảm từ 10 -> 5: quan sát thực tế thấy ReadTimeout ở probe
+    # khi 10 Task Instance cùng hit CDN đồng thời — tranh chấp băng thông
+    # khiến 1 vài request vượt quá 10s dù bản thân probe chỉ 1 byte).
     process_part = task(
         task_id="process_one_part",
         max_active_tis_per_dag=5,

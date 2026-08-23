@@ -81,17 +81,14 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 # ---------------------------------------------------------------------
 # HTTP fetch (RequestsPageFetcher)
 # ---------------------------------------------------------------------
-# Giảm so với mặc định ban đầu (10s/30s) — quyết định 2026-08-19: proxy
-# hỏng giờ bị rotate NGAY (is_proxy_error), timeout dài không còn cần
-# thiết, chỉ tốn thời gian chờ vô ích với proxy free chất lượng kém.
-CONNECT_TIMEOUT_SECONDS = _float("CRAWLER_CONNECT_TIMEOUT_SECONDS", 6.0)
-READ_TIMEOUT_SECONDS = _float("CRAWLER_READ_TIMEOUT_SECONDS", 12.0)
+CONNECT_TIMEOUT_SECONDS = _float("WEB_CRAWLER_CONNECT_TIMEOUT_SECONDS", 10.0)
+READ_TIMEOUT_SECONDS = _float("WEB_CRAWLER_READ_TIMEOUT_SECONDS", 30.0)
 
 
 # ---------------------------------------------------------------------
 # Proxy (proxy_manager.py)
 # ---------------------------------------------------------------------
-# Giảm 6s -> 4s: lọc bớt ngay từ vòng health-check những proxy tuy "sống"
+# Lọc bớt ngay từ vòng health-check những proxy tuy "sống"
 # nhưng phản hồi chậm — dấu hiệu quá tải/băng thông kém.
 PROXY_HEALTH_CHECK_TIMEOUT_SECONDS = _float("PROXY_HEALTH_CHECK_TIMEOUT_SECONDS", 4.0)
 PROXY_HEALTH_CHECK_WORKERS = _int("PROXY_HEALTH_CHECK_WORKERS", 20)
@@ -99,28 +96,28 @@ PROXY_MAX_CANDIDATES = _int("PROXY_MAX_CANDIDATES", 200)
 
 
 # ---------------------------------------------------------------------
-# Vòng lặp crawl chính (BronzeCrawlerCore.CrawlerConfig)
+# Vòng lặp crawl chính (WebCrawlerCore.CrawlerConfig) — Nhóm B, DAG 2
 # ---------------------------------------------------------------------
-CRAWLER_MAX_DETAIL_PAGES_PER_RUN = _int("CRAWLER_MAX_DETAIL_PAGES_PER_RUN", 1000)
-CRAWLER_TIME_BOX_SECONDS = _int("CRAWLER_TIME_BOX_SECONDS", 45 * 60)
-CRAWLER_DELAY_MIN_SECONDS = _float("CRAWLER_DELAY_MIN_SECONDS", 5.0)
-CRAWLER_DELAY_MAX_SECONDS = _float("CRAWLER_DELAY_MAX_SECONDS", 10.0)
+WEB_CRAWLER_MAX_DETAIL_PAGES_PER_RUN = _int("WEB_CRAWLER_MAX_DETAIL_PAGES_PER_RUN", 1000)
+WEB_CRAWLER_TIME_BOX_SECONDS = _int("WEB_CRAWLER_TIME_BOX_SECONDS", 45 * 60)
+WEB_CRAWLER_DELAY_MIN_SECONDS = _float("WEB_CRAWLER_DELAY_MIN_SECONDS", 5.0)
+WEB_CRAWLER_DELAY_MAX_SECONDS = _float("WEB_CRAWLER_DELAY_MAX_SECONDS", 10.0)
 # Ngân sách retry CÙNG 1 proxy — chỉ áp dụng cho lỗi mạng/server chung
 # chung (FETCH_ERROR). Lỗi liên quan proxy (chết/treo/429/CAPTCHA) KHÔNG
 # có ngân sách riêng: đổi proxy ngay, lặp tới khi hết proxy trong pool
 # (quyết định 2026-08-19).
-CRAWLER_MAX_FETCH_ERROR_RETRIES = _int("CRAWLER_MAX_FETCH_ERROR_RETRIES", 3)
-CRAWLER_FLUSH_INTERVAL_SECONDS = _int("CRAWLER_FLUSH_INTERVAL_SECONDS", 10 * 60)
-CRAWLER_FLUSH_PAGE_THRESHOLD = _int("CRAWLER_FLUSH_PAGE_THRESHOLD", 100)
+WEB_CRAWLER_MAX_FETCH_ERROR_RETRIES = _int("WEB_CRAWLER_MAX_FETCH_ERROR_RETRIES", 3)
+WEB_CRAWLER_FLUSH_INTERVAL_SECONDS = _int("WEB_CRAWLER_FLUSH_INTERVAL_SECONDS", 10 * 60)
+WEB_CRAWLER_FLUSH_PAGE_THRESHOLD = _int("WEB_CRAWLER_FLUSH_PAGE_THRESHOLD", 100)
 # Ngưỡng "đủ dữ liệu để coi là thành công" (quyết định 2026-08-19): trigger
 # flush sớm khi vừa đạt đủ số trang này lần đầu, VÀ là điều kiện để
 # run_dag2() coi 1 run dừng bất thường (fetch_error/proxy_exhausted) vẫn
 # là THÀNH CÔNG nếu đã kịp crawl đủ số trang này trước khi dừng.
-CRAWLER_MIN_SUCCESS_PAGES = _int("CRAWLER_MIN_SUCCESS_PAGES", 10)
+WEB_CRAWLER_MIN_SUCCESS_PAGES = _int("WEB_CRAWLER_MIN_SUCCESS_PAGES", 10)
 
 
 # ---------------------------------------------------------------------
-# Nhóm A — DAG 1 (bronze_load_dataset / dataset_loader_core.py)
+# Nhóm A — DAG 1 (dataset_loader / dataset_loader_core.py)
 # ---------------------------------------------------------------------
 # Không cần biến DATASET_TOTAL_PARTS ở đây — con số 77 part là hằng số
 # NGHIỆP VỤ cố định (CDN đã xác nhận), không phải tham số môi trường có
@@ -130,8 +127,11 @@ DATASET_CDN_BASE_URL = os.getenv(
     "DATASET_CDN_BASE_URL", "https://cdn.cuhuuhoang.com/alonhadat"
 )
 DATASET_S3_PREFIX = os.getenv("DATASET_S3_PREFIX", "bronze/dataset/")
-# Probe (GET Range: bytes=0-0) chỉ cần 1 byte đầu -> timeout ngắn.
-DATASET_PROBE_TIMEOUT_SECONDS = _float("DATASET_PROBE_TIMEOUT_SECONDS", 10.0)
+# Probe (GET Range: bytes=0-0) chỉ cần 1 byte đầu -> về lý thuyết rất
+# nhanh, nhưng 10s ban đầu không đủ buffer khi nhiều Task Instance chạy
+# song song (max_active_tis_per_dag) cùng hit CDN -> tăng lên 20s
+# (quyết định sau khi thấy ReadTimeout thật ở part 36 khi chạy 10 song song).
+DATASET_PROBE_TIMEOUT_SECONDS = _float("DATASET_PROBE_TIMEOUT_SECONDS", 20.0)
 # Download full file (part lớn nhất ~10.000 dòng) -> timeout dài hơn để
 # chịu được mạng chậm tới CDN, khác hẳn timeout ngắn của DAG 2 (trang HTML nhỏ).
 DATASET_DOWNLOAD_TIMEOUT_SECONDS = _float("DATASET_DOWNLOAD_TIMEOUT_SECONDS", 60.0)

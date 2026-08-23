@@ -1,5 +1,5 @@
 """
-dags/crawl_alonhadat_web.py
+dags/web_crawler.py
 
 DAG 2 — crawl trực tiếp alonhadat.com.vn theo control-plane
 crawl.listing_progress / crawl.detail_queue (mục 5, 6 tài liệu thiết kế).
@@ -35,7 +35,7 @@ default_args = {
 }
 
 with DAG(
-    dag_id="crawl_alonhadat_web",
+    dag_id="web_crawler",
     description="DAG 2 - crawl trực tiếp alonhadat.com.vn (listing_progress/detail_queue)",
     schedule="@hourly",
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Ho_Chi_Minh"),

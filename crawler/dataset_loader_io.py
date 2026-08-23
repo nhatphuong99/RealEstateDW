@@ -44,6 +44,18 @@ logger = logging.getLogger("dataset_loader_io")
 
 HCM_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
+# CDN có thể đứng sau CDN/WAF chặn User-Agent mặc định của thư viện
+# requests (giống trường hợp GeoNode bên proxy_manager.py) -> set sẵn
+# User-Agent giả trình duyệt cho phòng ngừa. LƯU Ý: đây KHÔNG phải
+# nguyên nhân của lỗi HTTP 530 (Cloudflare Origin DNS Error - lỗi hạ
+# tầng phía CDN, xảy ra SAU khi Cloudflare đã chấp nhận request).
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+}
+
 
 # ============================================================
 # 1. RequestsPartFetcher — implement Protocol PartFetcher
@@ -68,7 +80,10 @@ class RequestsPartFetcher:
         url = self._part_url(part_number)
         try:
             response = requests.get(
-                url, headers={"Range": "bytes=0-0"}, timeout=self._probe_timeout, stream=True
+                url,
+                headers={**DEFAULT_HEADERS, "Range": "bytes=0-0"},
+                timeout=self._probe_timeout,
+                stream=True,
             )
         except requests.exceptions.RequestException as exc:
             return ProbeResult(exists=False, error=str(exc))
@@ -97,7 +112,7 @@ class RequestsPartFetcher:
         streaming (quyết định D4)."""
         url = self._part_url(part_number)
         try:
-            response = requests.get(url, timeout=self._download_timeout)
+            response = requests.get(url, headers=DEFAULT_HEADERS, timeout=self._download_timeout)
             response.raise_for_status()
         except requests.exceptions.RequestException as exc:
             return DownloadResult(success=False, error=str(exc))
