@@ -138,7 +138,8 @@ metabase.log
 *.p12
 
 ### Databases / Dumps ###
-*.sql
+000*.sql
+test*.sql
 *.dump
 *.bak
 *.sql.gz
@@ -146,6 +147,8 @@ metabase.log
 .my.cnf
 data/raw/
 data/cleaned/
+postgres-init/
+
 
 ### Environment & Secrets ###
 .env
@@ -177,3 +180,4 @@ error_log.md
 crawler/tests/
 pytest.ini
 tests/
+parse_to_staging.py

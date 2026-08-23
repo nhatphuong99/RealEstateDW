@@ -30,6 +30,7 @@ import pendulum
 from airflow import DAG
 from airflow.decorators import task
 
+from crawler import config
 from crawler.dataset_loader_io import (
     compute_parts_to_process_task,
     process_one_part_task,
@@ -57,13 +58,10 @@ with DAG(
     # trực tiếp làm input cho .expand() của Task 2.
     compute_parts = task(task_id="compute_parts_to_process")(compute_parts_to_process_task)
 
-    # Task 2 (mapped) — 1 Task Instance / part, chạy song song tối đa 5
-    # cùng lúc (giảm từ 10 -> 5: quan sát thực tế thấy ReadTimeout ở probe
-    # khi 10 Task Instance cùng hit CDN đồng thời — tranh chấp băng thông
-    # khiến 1 vài request vượt quá 10s dù bản thân probe chỉ 1 byte).
+    # Task 2 (mapped) — giới hạn đồng thời để tránh tạo burst request lên CDN.
     process_part = task(
         task_id="process_one_part",
-        max_active_tis_per_dag=5,
+        max_active_tis_per_dag=config.DATASET_MAX_ACTIVE_TASKS,
     )(process_one_part_task)
 
     process_part.expand(part_number=compute_parts())

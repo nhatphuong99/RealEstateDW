@@ -20,6 +20,7 @@ tự retry đúng Task Instance đó (quyết định D1).
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -65,10 +66,17 @@ class RequestsPartFetcher:
     """GET trực tiếp CDN, không qua proxy (khác hẳn Nhóm B) — CDN không
     chặn/rate-limit như alonhadat.com.vn."""
 
-    def __init__(self, base_url: str, probe_timeout: float, download_timeout: float) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        probe_timeout: float,
+        download_timeout: float,
+        request_delay: float = 2.0,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._probe_timeout = probe_timeout
         self._download_timeout = download_timeout
+        self._request_delay = max(0.0, request_delay)
 
     def _part_url(self, part_number: int) -> str:
         return f"{self._base_url}/part{part_number}.parquet"
@@ -110,6 +118,8 @@ class RequestsPartFetcher:
     def download(self, part_number: int) -> DownloadResult:
         """GET full file 1 lần — part lớn nhất ~10.000 dòng, không cần
         streaming (quyết định D4)."""
+        if self._request_delay:
+            time.sleep(self._request_delay)
         url = self._part_url(part_number)
         try:
             response = requests.get(url, headers=DEFAULT_HEADERS, timeout=self._download_timeout)
@@ -217,6 +227,7 @@ def build_part_fetcher_from_env() -> RequestsPartFetcher:
         base_url=config.DATASET_CDN_BASE_URL,
         probe_timeout=config.DATASET_PROBE_TIMEOUT_SECONDS,
         download_timeout=config.DATASET_DOWNLOAD_TIMEOUT_SECONDS,
+        request_delay=config.DATASET_REQUEST_DELAY_SECONDS,
     )
 
 

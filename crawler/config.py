@@ -135,3 +135,5 @@ DATASET_PROBE_TIMEOUT_SECONDS = _float("DATASET_PROBE_TIMEOUT_SECONDS", 20.0)
 # Download full file (part lớn nhất ~10.000 dòng) -> timeout dài hơn để
 # chịu được mạng chậm tới CDN, khác hẳn timeout ngắn của DAG 2 (trang HTML nhỏ).
 DATASET_DOWNLOAD_TIMEOUT_SECONDS = _float("DATASET_DOWNLOAD_TIMEOUT_SECONDS", 60.0)
+DATASET_REQUEST_DELAY_SECONDS = _float("DATASET_REQUEST_DELAY_SECONDS", 2.0)
+DATASET_MAX_ACTIVE_TASKS = _int("DATASET_MAX_ACTIVE_TASKS", 2)
