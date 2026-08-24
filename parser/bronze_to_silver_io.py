@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import glob
 import os
+import sys
 from decimal import Decimal
 from typing import Iterator, Optional
 from urllib.parse import urlparse
@@ -43,6 +44,7 @@ from parser.config import (
     SPARK_APP_NAME,
     SPARK_DRIVER_MEMORY,
     SPARK_JARS_DIR,
+    SPARK_JARS_PACKAGES,
     SPARK_MASTER,
     get_postgres_dsn,
     get_spark_s3a_hadoop_conf,
@@ -87,12 +89,29 @@ def build_spark_session() -> SparkSession:
          gọi tay spark.sparkContext._jsc.hadoopConfiguration().set(...)
          sau khi session đã dựng xong.
     """
+    if not os.getenv("AIRFLOW_HOME"):
+        venv_scripts = os.path.dirname(sys.executable)
+        os.environ["PATH"] = venv_scripts + os.pathsep + os.environ.get("PATH", "")
+        os.environ["PYSPARK_PYTHON"] = "python"
+        os.environ["PYSPARK_DRIVER_PYTHON"] = "python"
+
     builder = (
         SparkSession.builder.appName(SPARK_APP_NAME)
         .master(SPARK_MASTER)
         .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
-        .config("spark.jars", _collect_jars(SPARK_JARS_DIR))
+        .config("spark.pyspark.python", "python")
+        .config("spark.pyspark.driver.python", "python")
     )
+
+    # Docker nạp bộ JAR ETL riêng trong /opt/spark-jars. Trên Windows,
+    # không truyền toàn bộ 276 JAR đi kèm PySpark qua spark.jars vì sẽ vượt
+    # giới hạn độ dài command line; Spark tự dùng classpath mặc định của nó.
+    if os.getenv("AIRFLOW_HOME"):
+        builder = builder.config("spark.jars", _collect_jars(SPARK_JARS_DIR))
+    elif os.getenv("SPARK_JARS_DIR"):
+        builder = builder.config("spark.jars", _collect_jars(SPARK_JARS_DIR))
+    else:
+        builder = builder.config("spark.jars.packages", SPARK_JARS_PACKAGES)
 
     for key, value in get_spark_s3a_hadoop_conf().items():
         builder = builder.config(f"spark.hadoop.{key}", value)
