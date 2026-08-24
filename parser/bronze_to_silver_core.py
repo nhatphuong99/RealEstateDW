@@ -11,6 +11,7 @@ hoặc script debug.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -151,6 +152,11 @@ def _get_text(tag: Optional[Tag]) -> str:
     return tag.get_text(" ", strip=True)
 
 
+def remove_special_characters(text: str) -> str:
+    """Loại ký tự symbol như emoji, giữ chữ, số, khoảng trắng và dấu câu."""
+    return "".join(char for char in text if not unicodedata.category(char).startswith("S")).strip()
+
+
 # ---------------------------------------------------------------------------
 # Parse bảng section.moreinfor1 -> dict {label: value}.
 # Mỗi <tr> gồm các cặp (label, value) tuần tự, số cột không đều (colspan),
@@ -225,7 +231,7 @@ def parse_listing_html(
         return _fail(f"khong trich duoc listing_id tu url: {listing_url}")
 
     title_tag = article.find(attrs={"itemprop": "name"})
-    title = _get_text(title_tag)
+    title = remove_special_characters(_get_text(title_tag))
     if not title:
         return _fail("thieu title (itemprop=name)")
 
