@@ -43,7 +43,6 @@ from parser.config import (
     SPARK_APP_NAME,
     SPARK_DRIVER_MEMORY,
     SPARK_JARS_DIR,
-    SPARK_LOCAL_PACKAGES,
     SPARK_MASTER,
     get_postgres_dsn,
     get_spark_s3a_hadoop_conf,
@@ -64,13 +63,6 @@ def _collect_jars(jars_dir: str) -> str:
     code tên dễ lệch giữa các lần build image khác nhau.
     """
     jar_paths = sorted(glob.glob(os.path.join(jars_dir, "*.jar")))
-    if not jar_paths and jars_dir == "/opt/spark-jars":
-        # /opt/spark-jars chỉ tồn tại trong image Docker; khi chạy host,
-        # dùng bộ JAR lõi đi kèm chính package PySpark.
-        import pyspark
-
-        local_jars_dir = os.path.join(os.path.dirname(pyspark.__file__), "jars")
-        jar_paths = sorted(glob.glob(os.path.join(local_jars_dir, "*.jar")))
     if not jar_paths:
         raise RuntimeError(
             f"Không tìm thấy jar nào trong {jars_dir!r} — kiểm tra lại "
@@ -95,18 +87,12 @@ def build_spark_session() -> SparkSession:
          gọi tay spark.sparkContext._jsc.hadoopConfiguration().set(...)
          sau khi session đã dựng xong.
     """
-    configured_jars = glob.glob(os.path.join(SPARK_JARS_DIR, "*.jar"))
     builder = (
         SparkSession.builder.appName(SPARK_APP_NAME)
         .master(SPARK_MASTER)
         .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
         .config("spark.jars", _collect_jars(SPARK_JARS_DIR))
     )
-
-    # Connector JARs are baked into the Docker image. On the host, resolve
-    # the same versions through Spark's package resolver instead.
-    if not configured_jars and SPARK_JARS_DIR == "/opt/spark-jars":
-        builder = builder.config("spark.jars.packages", SPARK_LOCAL_PACKAGES)
 
     for key, value in get_spark_s3a_hadoop_conf().items():
         builder = builder.config(f"spark.hadoop.{key}", value)

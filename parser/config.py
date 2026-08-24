@@ -49,7 +49,7 @@ SPARK_APP_NAME = os.getenv("SPARK_APP_NAME", "bronze_to_silver")
 # local[*] = dùng hết core máy đang chạy — đủ cho quy mô đồ án (1-2 file
 # test ở Phase 2, tối đa 77 part ~764k dòng ở Phase 5), không cần cluster
 # thật.
-SPARK_MASTER = os.getenv("SPARK_MASTER", "local[1]") # test 1 theartheard trước
+SPARK_MASTER = os.getenv("SPARK_MASTER", "local[*]")
 SPARK_DRIVER_MEMORY = os.getenv("SPARK_DRIVER_MEMORY", "2g")
 
 # Thư mục chứa TẤT CẢ jar cần nạp vào Spark (JDBC driver + hadoop-aws +
@@ -60,37 +60,24 @@ SPARK_DRIVER_MEMORY = os.getenv("SPARK_DRIVER_MEMORY", "2g")
 # hard-code tên ở đây dễ lệch nếu version đổi giữa các lần build.
 SPARK_JARS_DIR = os.getenv("SPARK_JARS_DIR", "/opt/spark-jars")
 
-# Khi chạy trực tiếp trên host, PySpark đã có sẵn các JAR lõi trong package
-# cài ở virtual environment. Docker vẫn dùng /opt/spark-jars do Dockerfile
-# cung cấp JDBC và S3A connector tương ứng.
-SPARK_LOCAL_PACKAGES = os.getenv(
-    "SPARK_LOCAL_PACKAGES",
-    "org.postgresql:postgresql:42.7.13,"
-    "org.apache.hadoop:hadoop-aws:3.5.0,"
-    "software.amazon.awssdk:bundle:2.35.4",
-)
-
 
 # ---------------------------------------------------------------------
 # S3A connector (Task 11 — Spark đọc trực tiếp s3a://, Phương án A đã chốt)
 # ---------------------------------------------------------------------
 # Đọc thẳng AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY đã có sẵn trong .env
 # qua provider chuẩn của Hadoop SDK — KHÔNG re-export credentials qua biến
-# Python nào ở đây, giữ đúng nguyên tắc "không tăng diện lộ credential".
-#
-# LƯU Ý: hadoop-aws 3.5.0 dùng AWS SDK V2 (HADOOP-18073, xem Dockerfile) ->
-# PHẢI dùng đúng class provider của package software.amazon.awssdk.*,
-# class cũ com.amazonaws.auth.EnvironmentVariableCredentialsProvider (v1)
-# sẽ không có trên classpath nữa -> ClassNotFoundException lúc chạy job.
+# Python nào ở đây, giữ đúng nguyên tắc "không tăng diện lộ credential"
+# đã áp dụng cho AWS_REGION ở config.py gốc.
 SPARK_S3A_CREDENTIALS_PROVIDER = (
-    "software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider"
+    "com.amazonaws.auth.EnvironmentVariableCredentialsProvider"
 )
 
 
 def get_spark_s3a_hadoop_conf() -> dict[str, str]:
     """Trả dict các key `fs.s3a.*` cần set vào SparkSession.builder.config()
     — tách riêng thành hàm để build_spark_session() (Task 9) không phải
-    tự nhớ tên từng key, chỉ cần loop qua dict này.
+    tự nhớ tên từng key, chỉ cần `.config(**get_spark_s3a_hadoop_conf())`
+    hoặc loop qua dict này.
 
     KHÔNG set fs.s3a.path.style.access=true: path-style đã bị AWS khai
     báo deprecated cho bucket tạo sau 2020-09-30 — để mặc định
