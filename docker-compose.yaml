@@ -61,8 +61,8 @@ x-airflow-common:
   # In order to add custom dependencies or upgrade provider distributions you can use your extended image.
   # Comment the image line, place your Dockerfile in the directory where you placed the docker-compose.yaml
   # and uncomment the "build" line below, Then run `docker-compose build` to build the images.
-  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.3.0}
-  # build: .
+  # image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.3.0}
+  build: .
   env_file:
     - ${ENV_FILE_PATH:-.env}
   environment:
@@ -89,6 +89,8 @@ x-airflow-common:
     # The following line can be used to set a custom config file, stored in the local config folder
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     PYTHONPATH: '/opt/airflow'
+    JAVA_HOME: /usr/lib/jvm/default-java
+    SPARK_JDBC_JAR: /opt/spark-jars/postgresql-42.7.13.jar   # để bronze_to_silver_io.py đọc qua os.getenv()
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs

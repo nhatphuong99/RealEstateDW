@@ -177,7 +177,6 @@ docs/
 error_log.md
 
 ### Tests
-crawler/tests/
 pytest.ini
 tests/
 parse_to_staging.py
