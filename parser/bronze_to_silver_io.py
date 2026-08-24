@@ -226,7 +226,7 @@ def _to_output_row(result) -> Row:
         )
 
     if isinstance(result, ParseError):
-        # 28 cột giữa crawl_date và error_reason (title..address_district_old)
+        # 30 cột giữa crawl_date và error_reason (title..address_district_old)
         # đều None — chỉ success mới có giá trị.
         return Row(
             None,  # listing_id
@@ -234,7 +234,7 @@ def _to_output_row(result) -> Row:
             None,  # source_part
             result.source_bronze_key,
             result.crawl_date,
-            *([None] * 28),  # title..address_district_old
+            *([None] * 30),  # title..address_district_old
             result.error_reason,
             result.raw_html,
         )
