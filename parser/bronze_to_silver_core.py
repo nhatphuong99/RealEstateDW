@@ -66,9 +66,11 @@ class ParsedListing:
     address_street_new: Optional[str]
     address_ward_new: Optional[str]
     address_province_new: Optional[str]
-    # address_old_raw giữ nguyên text thô — TÁCH ward_old/district_old cần
-    # danh mục hành chính cũ để match, CHƯA làm ở module này (xem TODO cuối file).
+    # address_old_raw giữ nguyên text thô để audit; ward_old/district_old
+    # tách qua parse_old_address() theo quy luật 4-phần-cách-dấu-phẩy.
     address_old_raw: Optional[str]
+    address_ward_old: Optional[str]
+    address_district_old: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -160,6 +162,26 @@ def _get_text(tag: Optional[Tag]) -> str:
 # (có dòng chỉ 1 cặp do colspan, vd "Thuộc dự án") nên KHÔNG dựa vào vị trí
 # cột cố định, chỉ ghép cặp tuần tự theo thứ tự xuất hiện.
 # ---------------------------------------------------------------------------
+
+
+def parse_old_address(raw: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Tách (ward_old, district_old) từ address_old_raw dạng:
+        'Đường X, Phường/Xã/Thị Trấn Y, Quận/Huyện/Thành phố Z, Tỉnh/Thành (cũ)'
+    Lấy 3 PHẦN CUỐI theo dấu ',' tính TỪ BÊN PHẢI (không giả định tổng số
+    phần luôn = 4 cứng nhắc — phòng khi tên đường có dấu ',' bên trong làm
+    lệch số phần). Phần tỉnh/thành (cuối cùng, có thể kèm hậu tố '(cũ)')
+    bị BỎ QUA — Silver không có address_province_old vì cấp tỉnh không đổi.
+    Giữ NGUYÊN tiền tố (Phường/Xã/Thị Trấn/Quận/Huyện...) trong giá trị trả
+    về, giống cách address_ward_new đang lưu (vd 'Xã Đại Thanh' chứ không
+    tách riêng loại + tên)."""
+    if not raw:
+        return None, None
+    parts = [p.strip() for p in raw.split(",")]
+    if len(parts) < 3:
+        return None, None
+    ward_old = parts[-3] or None
+    district_old = parts[-2] or None
+    return ward_old, district_old
 
 
 def _parse_moreinfor_table(section: Tag) -> dict[str, Tag]:
@@ -269,6 +291,7 @@ def parse_listing_html(
 
     old_address_tag = article.find("p", class_="old-address")
     address_old_raw = _get_text(old_address_tag) or None
+    address_ward_old, address_district_old = parse_old_address(address_old_raw)
 
     moreinfor_section = article.find("section", class_="moreinfor1")
     if moreinfor_section is None:
@@ -339,15 +362,6 @@ def parse_listing_html(
         address_ward_new=address_ward_new,
         address_province_new=address_province_new,
         address_old_raw=address_old_raw,
+        address_ward_old=address_ward_old,
+        address_district_old=address_district_old,
     )
-
-
-# ---------------------------------------------------------------------------
-# TODO (chưa làm ở module này, để scope Phase 1 gọn):
-#   address_ward_old / address_district_old — tách từ address_old_raw (free
-#   text, vd "Đường Cộng Hòa, Xã Hữu Hòa, Huyện Thanh Trì, Hà Nội") cần đối
-#   chiếu với danh mục hành chính cũ (trước sáp nhập) để match đúng. Đây là
-#   1 bước chuẩn hóa riêng (rule-based/fuzzy matching), cần có sẵn danh mục
-#   tham chiếu — chưa có trong scope Phase 1. address_old_raw vẫn được giữ
-#   nguyên text thô để bước sau xử lý.
-# ---------------------------------------------------------------------------
