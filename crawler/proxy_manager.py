@@ -1,25 +1,16 @@
 """
 crawler/proxy_manager.py
 
-Quản lý proxy động cho crawler: fetch từ ProxyScrape v4 + GeoNode,
-health-check song song qua httpbin.org/ip, `ProxyPool` round-robin có
-`refill()` khi cần bổ sung. `ProxyPool` implement ĐÚNG Protocol `ProxyPool`
-khai báo trong web_crawler_core.py (current/rotate/mark_failed) nên
-cắm thẳng vào `WebCrawlerCore` mà không cần sửa core/io.
-
-KHÔNG persist proxy xuống DB — đúng key learning đã ghi nhận: proxy free
-chết quá nhanh để đáng lưu, quản lý hoàn toàn trong bộ nhớ.
-
-Đã xác nhận API thật (18/08/2026, qua docs.proxyscrape.com và test trực
-tiếp — xem chi tiết trong hội thoại):
-    - ProxyScrape v4: request=getproxies&protocol=http&proxy_format=protocolipport&format=text
-      (tài liệu chính thức: https://docs.proxyscrape.com/api-reference/public-api/get-proxy-list)
-      Lưu ý: filter protocol=http không được API tôn trọng tuyệt đối
-      (thực tế vẫn trả lẫn socks4/socks5) -> BẮT BUỘC lọc lại phía client
-      theo tiền tố "http://".
-    - GeoNode: https://proxylist.geonode.com/api/proxy-list — BẮT BUỘC có
-      header User-Agent giả trình duyệt, thiếu sẽ bị trả 403.
+Quản lý proxy động cho crawler:
+- Nguồn: ProxyScrape v4; GeoNode.
+- Health-check song song qua httpbin.org/ip.
+- ProxyPool: round-robin + refill; implement Protocol ProxyPool (current/rotate/mark_failed)
+  — cắm thẳng vào WebCrawlerCore.
+- Không persist proxy xuống DB (proxy free chết nhanh).
+- Ghi chú API: ProxyScrape trả text — phải lọc tiền tố "http://";
+  GeoNode yêu cầu User-Agent giả trình duyệt (thiếu → 403).
 """
+
 
 from __future__ import annotations
 
@@ -54,9 +45,9 @@ GEONODE_HEADERS = {
 # ============================================================
 
 def fetch_from_proxyscrape(timeout: float = 15.0, limit: int = 500) -> list[str]:
-    """Lấy danh sách proxy từ ProxyScrape v4 (không cần API key).
-    Trả về dạng "http://ip:port" — CHỈ giữ proxy có tiền tố http://, loại
-    socks4/socks5 dù đã filter protocol=http (API không tôn trọng tuyệt đối)."""
+    """Lấy proxy từ ProxyScrape v4 (không cần API key).
+    Trả về dạng "http://ip:port" — chỉ giữ proxy http://, loại bỏ socks4/socks5
+    (vì API filter protocol=http không chuẩn tuyệt đối)."""
     try:
         response = requests.get(
             PROXYSCRAPE_URL,
@@ -121,9 +112,9 @@ def fetch_from_geonode(timeout: float = 15.0, limit: int = 100) -> list[str]:
 # ============================================================
 
 def health_check_one(proxy_url: str, timeout: float = 6.0) -> bool:
-    """Kiểm tra 1 proxy còn sống VÀ đủ nhanh — timeout ngắn (mặc định lấy
-    từ ProxyConfig) tự đóng vai trò bộ lọc chất lượng: proxy quá tải/băng
-    thông kém sẽ không kịp trả lời trong timeout dù "còn sống" về bản chất."""
+    """Kiểm tra proxy còn sống và đủ nhanh.
+    Timeout ngắn (từ ProxyConfig) tự lọc chất lượng:
+    proxy quá tải/băng thông kém sẽ không trả lời kịp dù vẫn "sống"."""
     start = time.monotonic()
     try:
         response = requests.get(
@@ -143,9 +134,11 @@ def health_check_one(proxy_url: str, timeout: float = 6.0) -> bool:
 def health_check_parallel(
     candidates: list[str], max_workers: int = 20, timeout: float = 6.0
 ) -> list[str]:
-    """Health-check song song nhiều proxy cùng lúc — vì proxy free chết rất
-    nhanh (key learning), phải check ngay trước khi dùng, không tin danh
-    sách gốc từ ProxyScrape/GeoNode. Trả về danh sách proxy còn sống."""
+    """Health-check song song nhiều proxy.
+    Proxy free chết nhanh nên phải check ngay trước khi dùng,
+    không tin danh sách gốc từ ProxyScrape/GeoNode.
+    Trả về danh sách proxy còn sống."""
+
     if not candidates:
         return []
 
@@ -171,10 +164,9 @@ def fetch_fresh_proxies(
     health_check_workers: int = config.PROXY_HEALTH_CHECK_WORKERS,
     health_check_timeout: float = config.PROXY_HEALTH_CHECK_TIMEOUT_SECONDS,
 ) -> list[str]:
-    """Lấy proxy mới từ cả 2 nguồn, gộp + dedup (giữ thứ tự), health-check
-    song song, trả về danh sách proxy ĐÃ XÁC NHẬN còn sống VÀ đủ nhanh
-    (timeout health-check ngắn — xem crawler/config.py — tự loại proxy quá
-    tải/băng thông kém dù vẫn "sống" về mặt kỹ thuật)."""
+    """Lấy proxy mới từ cả 2 nguồn, gộp + dedup (giữ thứ tự),
+    health-check song song, trả về danh sách proxy còn sống và đủ nhanh
+    (timeout ngắn tự loại proxy quá tải/dùng băng thông kém)."""
     proxyscrape_proxies = fetch_from_proxyscrape()
     geonode_proxies = fetch_from_geonode()
 
@@ -194,17 +186,15 @@ def fetch_fresh_proxies(
 # ============================================================
 
 class ProxyPool:
-    """Quản lý pool proxy trong bộ nhớ (KHÔNG persist DB — key learning:
-    proxy free chết quá nhanh để đáng lưu).
+    """Quản lý pool proxy trong bộ nhớ (không lưu DB — proxy free chết nhanh).
 
-    Implement ĐÚNG Protocol `ProxyPool` trong web_crawler_core.py
-    (`current`/`rotate`/`mark_failed`) — cắm thẳng vào `WebCrawlerCore`
-    được, thay cho `SimpleProxyPool` tạm thời trong web_crawler_io.py.
+    Implement đúng Protocol ProxyPool (current/rotate/mark_failed) trong web_crawler_core.py,
+    cắm thẳng vào WebCrawlerCore thay cho SimpleProxyPool.
 
-    `refill()` là method RIÊNG, core KHÔNG gọi tới — orchestrator (DAG) tự
-    gọi khi cần bổ sung proxy mới (VD đầu mỗi run, hoặc khi pool cạn hẳn
-    giữa chừng). Đây là network call tốn thời gian (health-check song
-    song), không nên gọi trong vòng lặp fetch chính."""
+    `refill()` là method riêng, orchestrator (DAG) tự gọi khi cần bổ sung proxy mới
+    (đầu mỗi run hoặc khi pool cạn). Đây là network call tốn thời gian (health-check song song),
+    không nên gọi trong vòng lặp fetch chính."""
+
 
     def __init__(self, proxies: Optional[list[str]] = None) -> None:
         self._lock = threading.Lock()
@@ -252,9 +242,8 @@ class ProxyPool:
         health_check_workers: int = config.PROXY_HEALTH_CHECK_WORKERS,
         health_check_timeout: float = config.PROXY_HEALTH_CHECK_TIMEOUT_SECONDS,
     ) -> int:
-        """Fetch + health-check proxy MỚI, THAY HOÀN TOÀN danh sách hiện
-        tại (bỏ luôn danh sách failed cũ — proxy mới chưa từng thất bại).
-        Trả về số proxy sống (và đủ nhanh) lấy được."""
+        """Fetch + health-check proxy mới, thay toàn bộ danh sách hiện tại
+        (bỏ danh sách failed cũ). Trả về số proxy sống và đủ nhanh."""
         fresh = fetch_fresh_proxies(max_candidates, health_check_workers, health_check_timeout)
         with self._lock:
             self._proxies = fresh

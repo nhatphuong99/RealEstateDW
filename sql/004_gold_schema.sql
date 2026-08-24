@@ -131,13 +131,13 @@ CREATE TABLE gold.fact_listing_price (
 );
 
 COMMENT ON TABLE gold.fact_listing_price IS
-    'Fact chính. Grain: 1 dòng = 1 phiên bản giá (SCD2) của 1 tin đăng. '
-    'BẮT BUỘC lọc price_is_negotiable = false khi tính AVG(price_per_m2_vnd), '
-    'vì tin thỏa thuận có price_vnd gốc = 0, làm lệch nghiêm trọng nếu không lọc.';
+    'Fact chính. Grain: 1 dòng = 1 phiên bản giá (SCD2). '
+    'Khi tính AVG(price_per_m2_vnd) phải lọc price_is_negotiable=false '
+    'để tránh dữ liệu thỏa thuận (price_vnd=0) làm lệch kết quả.';
 COMMENT ON COLUMN gold.fact_listing_price.posted_date_key IS
-    'Role 1: ngày đăng tin - dùng cho "xu hướng theo thời điểm rao tin".';
+    'Ngày đăng tin — dùng cho xu hướng theo thời điểm rao tin.';
 COMMENT ON COLUMN gold.fact_listing_price.price_valid_from_date_key IS
-    'Role 2: ngày phiên bản giá này bắt đầu hiệu lực - dùng cho "giá thị trường tại từng thời điểm" (point-in-time).';
+    'Ngày phiên bản giá bắt đầu hiệu lực — dùng cho giá thị trường tại từng thời điểm.';
 
 -- Index phục vụ truy vấn chính: giá theo Phường-Xã/Loại hình/Thời gian
 CREATE INDEX idx_fact_location            ON gold.fact_listing_price (location_key);

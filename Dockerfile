@@ -15,18 +15,26 @@ RUN mkdir -p /opt/spark-jars \
     && curl -fL -o /opt/spark-jars/postgresql-42.7.13.jar \
        https://jdbc.postgresql.org/download/postgresql-42.7.13.jar
 
-# S3A connector — đọc trực tiếp s3a:// (Task 11, Phương án A).
-# PySpark 4.2.0 đóng gói Hadoop 3.5 -> cần hadoop-aws 3.5.0.
-# QUAN TRỌNG: từ Hadoop 3.4.0 trở đi, hadoop-aws đã chuyển sang AWS SDK V2
-# (HADOOP-18073) -> dependency KHÔNG còn là com.amazonaws:aws-java-sdk-bundle
-# (v1) nữa mà là software.amazon.awssdk:bundle (v2). Version 2.35.4 lấy
-# TRỰC TIẾP từ release notes chính thức Hadoop 3.5.0 (không tự resolve qua
-# .pom nữa — lần trước resolve động bị lỗi vì giả định sai dependency v1,
-# pin cứng theo nguồn công bố chính thức là cách an toàn hơn ở đây).
+# S3A connector đầy đủ cho Hadoop 3.5.0 — Task 11, Phương án A.
+# 3 jar dưới đây PHẢI đi cùng nhau, đã đối chiếu đúng version qua pom.xml
+# chính thức của hadoop-aws:3.5.0 (Maven Central) + pom.xml của Apache
+# Spark (dùng để xác nhận cặp version bundle/analyticsaccelerator tương
+# thích, vì Spark tự build/test với đúng cặp version này):
+#   1. hadoop-aws-3.5.0.jar        — S3AFileSystem, đọc s3a://
+#   2. bundle-2.35.4.jar           — AWS SDK V2 (Hadoop 3.4+ đã chuyển
+#      hẳn sang SDK V2, không còn dùng com.amazonaws:aws-java-sdk-bundle
+#      của SDK V1 nữa — HADOOP-18073)
+#   3. analyticsaccelerator-s3-1.3.1.jar — dependency SCOPE=COMPILE của
+#      hadoop-aws:3.5.0 (xác nhận qua .pom chính thức), KHÔNG PHẢI
+#      optional dù tính năng Analytics Accelerator có bật hay không —
+#      thiếu jar này S3AFileSystem không LOAD ĐƯỢC (NoClassDefFoundError
+#      ngay cả khi fs.s3a.input.stream.type=classic).
 RUN curl -fL -o /opt/spark-jars/hadoop-aws-3.5.0.jar \
         https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.5.0/hadoop-aws-3.5.0.jar \
     && curl -fL -o /opt/spark-jars/bundle-2.35.4.jar \
         https://repo1.maven.org/maven2/software/amazon/awssdk/bundle/2.35.4/bundle-2.35.4.jar \
+    && curl -fL -o /opt/spark-jars/analyticsaccelerator-s3-1.3.1.jar \
+        https://repo1.maven.org/maven2/software/amazon/s3/analyticsaccelerator/analyticsaccelerator-s3/1.3.1/analyticsaccelerator-s3-1.3.1.jar \
     && chown -R airflow:0 /opt/spark-jars
 
 USER airflow

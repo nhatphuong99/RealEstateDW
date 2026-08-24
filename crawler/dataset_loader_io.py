@@ -1,21 +1,20 @@
 """
 crawler/dataset_loader_io.py
 
-Implement THẬT các Protocol khai báo trong dataset_loader_core.py:
-    - RequestsPartFetcher -> GET CDN part1..part77.parquet (requests)
-    - S3PartUploader      -> put_object lên S3 (boto3)
-    - PsycopgPartStateStore -> crawl.dataset_part_state (psycopg2)
-    - compute_parts_to_process_task() / process_one_part_task() -> 2 điểm
-      gọi DUY NHẤT mà dags/bronze_load_dataset.py dùng (task 1 / task 2 mapped)
+Thực hiện các Protocol trong dataset_loader_core.py:
+    - RequestsPartFetcher -> tải CDN part1..77.parquet
+    - S3PartUploader      -> upload lên S3
+    - PsycopgPartStateStore -> lưu trạng thái dataset (Postgres)
+    - compute_parts_to_process_task() / process_one_part_task() -> 2 task duy nhất
+      được dags/bronze_load_dataset.py gọi
 
-Core (dataset_loader_core.py) hoàn toàn không biết đến module này — mọi
-import psycopg2/boto3/requests CHỈ nằm ở đây, đúng nguyên tắc tách biệt
-logic thuần khỏi I/O thật (giống web_crawler_io.py bên Nhóm B).
+Core không biết module này — mọi import psycopg2/boto3/requests chỉ nằm ở đây,
+đảm bảo tách biệt logic khỏi I/O (giống web_crawler_io.py Nhóm B).
 
-Khác với Nhóm B: KHÔNG tự viết retry loop ở đây — lỗi ở bất kỳ bước nào
-(probe/download/upload) đều ghi nhận vào DB rồi `raise` ngay, để Airflow
-tự retry đúng Task Instance đó (quyết định D1).
+Khác Nhóm B: không viết retry loop — lỗi probe/download/upload ghi vào DB rồi raise,
+để Airflow tự retry đúng Task Instance (quyết định D1).
 """
+
 
 from __future__ import annotations
 
@@ -45,11 +44,9 @@ logger = logging.getLogger("dataset_loader_io")
 
 HCM_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
-# CDN có thể đứng sau CDN/WAF chặn User-Agent mặc định của thư viện
-# requests (giống trường hợp GeoNode bên proxy_manager.py) -> set sẵn
-# User-Agent giả trình duyệt cho phòng ngừa. LƯU Ý: đây KHÔNG phải
-# nguyên nhân của lỗi HTTP 530 (Cloudflare Origin DNS Error - lỗi hạ
-# tầng phía CDN, xảy ra SAU khi Cloudflare đã chấp nhận request).
+# CDN/WAF có thể chặn User-Agent mặc định của requests
+# (như GeoNode trong proxy_manager.py) → đặt sẵn UA giả trình duyệt.
+# Lưu ý: không liên quan lỗi HTTP 530 (Cloudflare Origin DNS Error).
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -63,8 +60,7 @@ DEFAULT_HEADERS = {
 # ============================================================
 
 class RequestsPartFetcher:
-    """GET trực tiếp CDN, không qua proxy (khác hẳn Nhóm B) — CDN không
-    chặn/rate-limit như alonhadat.com.vn."""
+    """GET trực tiếp CDN, không qua proxy — CDN không chặn/rate-limit."""
 
     def __init__(
         self,
@@ -82,9 +78,8 @@ class RequestsPartFetcher:
         return f"{self._base_url}/part{part_number}.parquet"
 
     def probe(self, part_number: int) -> ProbeResult:
-        """GET + Range: bytes=0-0 (KHÔNG dùng HEAD — CDN trả 401 sai chuẩn
-        với HEAD, đã xác nhận thực tế). `stream=True` để không tải nguyên
-        file chỉ để kiểm tra tồn tại."""
+        """GET + Range: bytes=0-0 (không dùng HEAD — CDN trả 401 sai chuẩn).
+        Dùng `stream=True` để chỉ kiểm tra tồn tại, không tải toàn bộ file."""
         url = self._part_url(part_number)
         try:
             response = requests.get(
@@ -104,9 +99,9 @@ class RequestsPartFetcher:
 
     @staticmethod
     def _parse_total_size(headers) -> Optional[int]:
-        """Ưu tiên đọc tổng kích thước thật từ Content-Range (VD:
-        "bytes 0-0/12345" -> 12345) — Content-Length khi có Range chỉ là
-        kích thước phần trả về (1 byte), không phải kích thước file."""
+        """Ưu tiên lấy kích thước file từ **Content-Range** (ví dụ "bytes 0-0/12345" → 12345).
+        **Content-Length** khi dùng Range chỉ là kích thước phần trả về, không phải tổng."""
+
         content_range = headers.get("Content-Range")
         if content_range and "/" in content_range:
             total = content_range.rsplit("/", 1)[-1]
@@ -116,8 +111,7 @@ class RequestsPartFetcher:
         return int(content_length) if content_length and content_length.isdigit() else None
 
     def download(self, part_number: int) -> DownloadResult:
-        """GET full file 1 lần — part lớn nhất ~10.000 dòng, không cần
-        streaming (quyết định D4)."""
+        """GET full file 1 lần — part lớn nhất ~10.000 dòng, không cần streaming."""
         if self._request_delay:
             time.sleep(self._request_delay)
         url = self._part_url(part_number)
@@ -149,8 +143,7 @@ class S3PartUploader:
 
 
 def list_existing_s3_keys(bucket: str, prefix: str, s3_client=None) -> set[str]:
-    """Liệt kê TOÀN BỘ key thật đang có trên S3 dưới `prefix` — nguồn sự
-    thật để đối chiếu với `crawl.dataset_part_state` (A3 reconcile)."""
+    """Liệt kê tất cả key thực trên S3 dưới `prefix` để đối chiếu với crawl.dataset_part_state."""
     s3 = s3_client or boto3.client("s3")
     paginator = s3.get_paginator("list_objects_v2")
     keys: set[str] = set()
@@ -166,8 +159,7 @@ def list_existing_s3_keys(bucket: str, prefix: str, s3_client=None) -> set[str]:
 
 class PsycopgPartStateStore:
     """Thao tác bảng crawl.dataset_part_state (DDL: sql/002_dataset_part_state.sql).
-    `autocommit=True` — mỗi method là 1 statement độc lập, giống
-    PsycopgControlPlaneRepo bên Nhóm B."""
+    `autocommit=True` — mỗi method là 1 statement độc lập, giống PsycopgControlPlaneRepo Nhóm B."""
 
     def __init__(self, dsn: str) -> None:
         self._conn = psycopg2.connect(dsn)
@@ -260,7 +252,7 @@ def compute_parts_to_process_task() -> list[int]:
 def process_one_part_task(part_number: int) -> None:
     """Điểm gọi cho Task 2 (mapped, 1 Task Instance / part). Lỗi ở bất kỳ
     bước nào -> ghi crawl.dataset_part_state rồi `raise` ngay để Airflow
-    tự retry đúng Task Instance này (KHÔNG tự viết retry loop — quyết định D1)."""
+    tự retry đúng Task Instance này."""
     outcome: PartOutcome = process_one_part(
         part_number,
         fetcher=build_part_fetcher_from_env(),

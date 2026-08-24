@@ -1,27 +1,11 @@
--- =============================================================================
+-- ============================================================================
 -- sql/005_etl_bronze_to_silver_control.sql
 -- Control-plane + staging + quarantine cho DAG 3 (bronze_to_silver).
---
--- 3 bảng:
---   1. crawl.bronze_file_state — theo dõi file Bronze nào ĐÃ ĐƯỢC PARSE vào
---      Silver hay chưa. Tách biệt với crawl.dataset_part_state (bảng đó chỉ
---      theo dõi trạng thái TẢI file lên S3, không phải trạng thái parse).
---   2. silver.listing_staging_batch — landing zone tạm cho 1 lần chạy Spark
---      parse job. UNLOGGED để tăng tốc bulk write (mất dữ liệu khi crash
---      không sao — Bronze vẫn immutable, chạy lại ETL là đủ).
---   3. silver.parse_quarantine — lưu các bản ghi parse thất bại (HTML lệch
---      cấu trúc, numeric overflow, thiếu field bắt buộc...) để debug sau,
---      thay vì làm crash cả batch.
---
--- Idempotent: dùng IF NOT EXISTS, có thể chạy lại nhiều lần an toàn.
---
--- DEPENDENCY: PHẢI chạy sau 003_silver_listings_history.sql — bảng
--- listing_staging_batch dùng hàm silver.compute_row_hash() định nghĩa ở đó.
--- =============================================================================
+-- 3 bảng: bronze_file_state (trạng thái parse), listing_staging_batch (landing zone),
+-- parse_quarantine (ghi lỗi parse). Idempotent. Phải chạy sau 003_silver_listings_history.sql.
+-- ============================================================================
 
--- -----------------------------------------------------------------------------
--- 1. Control-plane: file Bronze nào cần/đã parse
--- -----------------------------------------------------------------------------
+-- 1. Control-plane: trạng thái parse file Bronze
 CREATE TABLE IF NOT EXISTS crawl.bronze_file_state (
     s3_key            TEXT PRIMARY KEY,
     source            TEXT NOT NULL,                    -- 'dataset' | 'web'
@@ -41,9 +25,8 @@ COMMENT ON TABLE crawl.bronze_file_state IS
     'Control-plane cho DAG 3 (bronze_to_silver). Khác với crawl.dataset_part_state '
     '(theo dõi trạng thái TẢI file lên S3) — bảng này theo dõi trạng thái PARSE vào Silver.';
 
--- -----------------------------------------------------------------------------
+
 -- 2. Staging: landing zone tạm cho 1 lần chạy Spark parse job
--- -----------------------------------------------------------------------------
 CREATE UNLOGGED TABLE IF NOT EXISTS silver.listing_staging_batch (
     listing_id           BIGINT       NOT NULL,
     listing_url           TEXT         NOT NULL,
@@ -93,10 +76,7 @@ CREATE UNLOGGED TABLE IF NOT EXISTS silver.listing_staging_batch (
     address_district_old            VARCHAR(100),
 
     -- row_hash: GENERATED, gọi CÙNG hàm silver.compute_row_hash() như bên
-    -- listing_history (đã tạo trong 003_silver_listings_history.sql — file
-    -- này PHẢI chạy sau 003). Spark KHÔNG gửi giá trị row_hash khi ghi JDBC —
-    -- chỉ ghi các trường thô, Postgres tự tính khi INSERT. Loại bỏ hoàn toàn
-    -- rủi ro công thức MD5 lệch nhau giữa Spark và Postgres.
+    -- listing_history (tạo trong 003_silver_listings_history.sql)
     row_hash                CHAR(32)
         GENERATED ALWAYS AS (
             silver.compute_row_hash(price_vnd, price_is_negotiable, is_expired, has_warning, area_m2)
@@ -116,9 +96,7 @@ COMMENT ON TABLE silver.listing_staging_batch IS
     'Landing zone tạm cho 1 lần chạy Spark parse job. TRUNCATE trước mỗi batch. '
     'UNLOGGED — chấp nhận mất dữ liệu khi crash vì Bronze vẫn immutable, chạy lại ETL là đủ.';
 
--- -----------------------------------------------------------------------------
 -- 3. Quarantine: bản ghi parse thất bại
--- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS silver.parse_quarantine (
     id                 BIGSERIAL    PRIMARY KEY,
     url                 TEXT         NOT NULL,

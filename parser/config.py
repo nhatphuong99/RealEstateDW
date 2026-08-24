@@ -66,27 +66,33 @@ SPARK_JARS_DIR = os.getenv("SPARK_JARS_DIR", "/opt/spark-jars")
 # ---------------------------------------------------------------------
 # Đọc thẳng AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY đã có sẵn trong .env
 # qua provider chuẩn của Hadoop SDK — KHÔNG re-export credentials qua biến
-# Python nào ở đây, giữ đúng nguyên tắc "không tăng diện lộ credential"
-# đã áp dụng cho AWS_REGION ở config.py gốc.
+# Python nào ở đây, giữ đúng nguyên tắc "không tăng diện lộ credential".
+#
+# LƯU Ý: hadoop-aws 3.5.0 dùng AWS SDK V2 (HADOOP-18073, xem Dockerfile) ->
+# PHẢI dùng đúng class provider của package software.amazon.awssdk.*,
+# class cũ com.amazonaws.auth.EnvironmentVariableCredentialsProvider (v1)
+# sẽ không có trên classpath nữa -> ClassNotFoundException lúc chạy job.
 SPARK_S3A_CREDENTIALS_PROVIDER = (
-    "com.amazonaws.auth.EnvironmentVariableCredentialsProvider"
+    "software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider"
 )
 
 
 def get_spark_s3a_hadoop_conf() -> dict[str, str]:
-    """Trả dict các key `fs.s3a.*` cần set vào SparkSession.builder.config()
-    — tách riêng thành hàm để build_spark_session() (Task 9) không phải
-    tự nhớ tên từng key, chỉ cần `.config(**get_spark_s3a_hadoop_conf())`
-    hoặc loop qua dict này.
-
-    KHÔNG set fs.s3a.path.style.access=true: path-style đã bị AWS khai
-    báo deprecated cho bucket tạo sau 2020-09-30 — để mặc định
-    (virtual-hosted-style) là lựa chọn đúng lâu dài cho bucket mới.
-    """
+    """Trả dict các key `fs.s3a.*` cần set vào SparkSession.builder.config()..."""
     return {
         "fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
         "fs.s3a.aws.credentials.provider": SPARK_S3A_CREDENTIALS_PROVIDER,
         "fs.s3a.endpoint.region": AWS_REGION,
+        # Hadoop 3.5.0 (HADOOP-19559) đổi cơ chế chọn stream đọc S3A sang
+        # key "fs.s3a.input.stream.type" (KHÔNG PHẢI
+        # "fs.s3a.analytics.accelerator.enabled" như bản PR gốc
+        # HADOOP-19348 — đã thử flag đó, KHÔNG có tác dụng vì code 3.5.0
+        # không còn đọc key cũ). Giá trị mặc định "analytics" trong
+        # 3.5.0 đúng cho trường hợp Spark+Parquet (giống hệt use-case ở
+        # đây) -> cần "classic" (stream truyền thống) để KHÔNG đòi hỏi
+        # jar analyticsaccelerator-s3 riêng (chưa tải, không cần ở quy
+        # mô đồ án).
+        "fs.s3a.input.stream.type": "classic",
     }
 
 
