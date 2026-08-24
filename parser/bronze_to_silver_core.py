@@ -1,12 +1,12 @@
 """
 parser/bronze_to_silver_core.py
 
-Logic thuần (pure) parse 1 HTML tin đăng alonhadat.com.vn -> ParsedListing
-hoặc ParseError. KHÔNG import boto3/psycopg2/pyspark — module này chỉ nhận
-bytes HTML + vài tham số ngữ cảnh (url, crawl_date, source_bronze_key,
-source_part) qua tham số hàm, để có thể test độc lập, dùng lại được ở cả
-Spark (mapPartitions) lẫn script debug tay.
+Logic thuần parse HTML tin đăng alonhadat.com.vn -> ParsedListing hoặc ParseError.
+Không import I/O libs, chỉ nhận bytes HTML + tham số ngữ cảnh (url, crawl_date,
+source_bronze_key, source_part). Có thể test độc lập, dùng lại cho Spark mapPartitions
+hoặc script debug.
 """
+
 
 from __future__ import annotations
 
@@ -94,16 +94,13 @@ def _is_missing(text: str) -> bool:
 
 
 def parse_vn_number(text: Optional[str]) -> Optional[Decimal]:
-    """Parse số kiểu VN, KHÔNG naive replace(',', '.').
+    """Parse số kiểu VN, không naive replace(',', '.').
 
-    Quy tắc (đã xác nhận qua exception_data.md):
-    - Có dấu ',' -> ',' LÀ thập phân (vd "2,5m" = 2.5; "4,5m" = 4.5).
-      Nếu đồng thời có '.' thì '.' là hàng nghìn, bỏ đi trước khi thay ','.
-    - Không có ',', có '.' theo sau đúng các nhóm 3 chữ số -> '.' là hàng
-      nghìn (vd "5.300" = 5300, "1.000" = 1000) — field diện tích cấu trúc
-      (itemprop=value) không có phần thập phân.
-    - Không dấu nào -> parse thẳng ("35" = 35, "25m" = 25).
-    - Ký hiệu thiếu dữ liệu ("---", "-", "_", rỗng...) -> None.
+    Quy tắc:
+    - Có ',' -> ',' là thập phân; '.' là hàng nghìn nếu cùng xuất hiện.
+    - Không ',' -> '.' theo nhóm 3 chữ số là hàng nghìn.
+    - Không dấu -> parse thẳng số.
+    - Ký hiệu thiếu dữ liệu ('---','-','_','') -> None.
     """
     if text is None:
         return None
@@ -131,9 +128,8 @@ def parse_vn_number(text: Optional[str]) -> Optional[Decimal]:
 
 
 def extract_listing_id_from_url(url: str) -> Optional[int]:
-    """Trích listing_id từ URL dạng '...-12345678.html' (nguồn sự thật cho
-    listing_id — "Mã tin" trong bảng chỉ dùng để QC đối chiếu, không phải
-    nguồn chính)."""
+    """Trích listing_id từ URL dạng '...-12345678.html'.
+    Nguồn chính cho listing_id, 'Mã tin' chỉ QC đối chiếu."""
     match = re.search(r"-(\d+)\.html?\s*$", url.strip())
     if not match:
         return None
@@ -141,10 +137,9 @@ def extract_listing_id_from_url(url: str) -> Optional[int]:
 
 
 def _parse_check_icon(cell: Tag) -> Optional[bool]:
-    """True nếu có icon check (<img alt="check">); None nếu ký hiệu thiếu
-    ('_','-','--','---', rỗng, hoặc bất kỳ text nào khác icon) — theo
-    exception_data.md, giá trị False THẬT chưa từng quan sát trên site,
-    nên mọi trạng thái không phải icon đều coi là "chưa xác định"."""
+    """True nếu có icon check (<img alt="check">).
+    None nếu ký hiệu thiếu ('_','-','--','---',''...). 
+    """
     if cell.find("img", alt="check") is not None:
         return True
     return None
@@ -157,23 +152,17 @@ def _get_text(tag: Optional[Tag]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Parse bảng section.moreinfor1 -> dict {nhãn: <td> value cell}.
-# Mỗi <tr> là chuỗi các cặp (label, value) liên tiếp — SỐ CỘT KHÔNG ĐỀU
-# (có dòng chỉ 1 cặp do colspan, vd "Thuộc dự án") nên KHÔNG dựa vào vị trí
-# cột cố định, chỉ ghép cặp tuần tự theo thứ tự xuất hiện.
+# Parse bảng section.moreinfor1 -> dict {label: value}.
+# Mỗi <tr> gồm các cặp (label, value) tuần tự, số cột không đều (colspan),
+# nên không dựa vào vị trí cố định mà ghép theo thứ tự xuất hiện.
 # ---------------------------------------------------------------------------
 
 
 def parse_old_address(raw: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """Tách (ward_old, district_old) từ address_old_raw dạng:
-        'Đường X, Phường/Xã/Thị Trấn Y, Quận/Huyện/Thành phố Z, Tỉnh/Thành (cũ)'
-    Lấy 3 PHẦN CUỐI theo dấu ',' tính TỪ BÊN PHẢI (không giả định tổng số
-    phần luôn = 4 cứng nhắc — phòng khi tên đường có dấu ',' bên trong làm
-    lệch số phần). Phần tỉnh/thành (cuối cùng, có thể kèm hậu tố '(cũ)')
-    bị BỎ QUA — Silver không có address_province_old vì cấp tỉnh không đổi.
-    Giữ NGUYÊN tiền tố (Phường/Xã/Thị Trấn/Quận/Huyện...) trong giá trị trả
-    về, giống cách address_ward_new đang lưu (vd 'Xã Đại Thanh' chứ không
-    tách riêng loại + tên)."""
+    """Tách (ward_old, district_old) từ address_old_raw dạng 
+    'Đường X, Phường/Xã/Thị Trấn Y, Quận/Huyện/Thành phố Z, Tỉnh/Thành (cũ)'.
+    Lấy 3 phần cuối theo dấu ',' từ phải, bỏ tỉnh/thành (không lưu vì cấp tỉnh không đổi).
+    Giữ nguyên tiền tố (Phường/Xã/Quận/Huyện...) trong giá trị trả về."""
     if not raw:
         return None, None
     parts = [p.strip() for p in raw.split(",")]
@@ -208,9 +197,8 @@ def parse_listing_html(
     source_part: str,
     source_bronze_key: str,
 ) -> Union[ParsedListing, ParseError]:
-    """Parse 1 bản ghi Bronze (raw html bytes của 1 tin đăng chi tiết)
-    thành ParsedListing (thành công) hoặc ParseError (thất bại, kèm lý do
-    để ghi vào silver.parse_quarantine)."""
+    """Parse 1 bản ghi Bronze (raw HTML) thành ParsedListing hoặc ParseError
+    để ghi vào silver.parse_quarantine."""
 
     def _fail(reason: str) -> ParseError:
         return ParseError(
@@ -226,9 +214,8 @@ def parse_listing_html(
     except Exception as exc:  # noqa: BLE001 - cố tình bắt mọi lỗi parse HTML
         return _fail(f"loi parse html: {exc}")
 
-    # Container an toàn: class="property" (số ít) — KHÔNG nhầm với
-    # "property-item" (số nhiều, tin liên quan/sidebar). BeautifulSoup so
-    # khớp theo từng token class riêng biệt nên 2 class này không đụng nhau.
+    # Container an toàn: class="property" (khác "property-item" sidebar).
+    # BeautifulSoup so khớp theo token class riêng nên không nhầm lẫn.
     article = soup.find("article", class_="property")
     if article is None:
         return _fail("khong tim thay <article class='property'>")

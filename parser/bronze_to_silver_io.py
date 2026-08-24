@@ -1,41 +1,27 @@
 """
 parser/bronze_to_silver_io.py
 
-I/O layer cho ETL Bronze -> Silver (Phase 2). Import boto3/pyspark/
-psycopg2 — đây là module DUY NHẤT trong package parser được phép import
-3 thư viện I/O này, đúng nguyên tắc tách biệt core/io đã áp dụng cho
-crawler/web_crawler_core.py & crawler/web_crawler_io.py.
-
-parser/bronze_to_silver_core.py (pure logic, Phase 1, đã hoàn thành)
-KHÔNG import module này — chỉ nhận tham số qua function argument.
-
-Thứ tự trong file: Task 9 (SparkSession) -> Task 10 (parse_partition) ->
-Task 11 (đọc Bronze qua s3a://) -> Task 12 (split + ghi JDBC), đúng thứ
-tự phụ thuộc: Task 12 dùng output Task 10, Task 11 cung cấp input cho
-Task 10, cả 3 đều cần SparkSession từ Task 9.
+I/O layer cho ETL Bronze -> Silver (Phase 2).
+Module duy nhất trong parser được phép import boto3/pyspark/psycopg2,
+tách biệt core/io. Thứ tự: Task 9 (SparkSession) -> Task 10 (parse_partition)
+-> Task 11 (đọc Bronze S3) -> Task 12 (split + ghi JDBC).
 """
 
 from __future__ import annotations
 
 import glob
 import os
+import tempfile
 from decimal import Decimal
 from typing import Iterator, Optional
 from urllib.parse import urlparse
 
+import boto3
 from pyspark.sql import DataFrame, Row, SparkSession
 from pyspark.sql.functions import col
 from pyspark.sql.types import (
-    BinaryType,
-    BooleanType,
-    DateType,
-    DecimalType,
-    LongType,
-    ShortType,
-    StringType,
-    StructField,
-    StructType,
-    TimestampType,
+    BinaryType, BooleanType, DateType, DecimalType, LongType, ShortType,
+    StringType, StructField, StructType, TimestampType,
 )
 
 from parser.bronze_to_silver_core import ParseError, ParsedListing, parse_listing_html
@@ -45,8 +31,7 @@ from parser.config import (
     SPARK_JARS_DIR,
     SPARK_MASTER,
     get_postgres_dsn,
-    get_spark_s3a_hadoop_conf,
-    s3a_uri,
+    get_s3_bucket,
 )
 
 
@@ -56,59 +41,32 @@ from parser.config import (
 
 
 def _collect_jars(jars_dir: str) -> str:
-    """Gom TẤT CẢ *.jar trong jars_dir thành 1 chuỗi phân cách bởi dấu
-    phẩy (đúng định dạng tham số spark.jars). Dùng glob thay vì liệt kê
-    tên file cứng — tên aws-java-sdk-bundle-*.jar có version ĐỘNG
-    (Dockerfile tự resolve đúng version khớp hadoop-aws lúc build), hard-
-    code tên dễ lệch giữa các lần build image khác nhau.
-    """
     jar_paths = sorted(glob.glob(os.path.join(jars_dir, "*.jar")))
     if not jar_paths:
         raise RuntimeError(
             f"Không tìm thấy jar nào trong {jars_dir!r} — kiểm tra lại "
-            "Dockerfile đã tải đủ JDBC driver + hadoop-aws + "
-            "aws-java-sdk-bundle chưa."
+            "Dockerfile đã tải JDBC driver chưa."
         )
     return ",".join(jar_paths)
 
 
 def build_spark_session() -> SparkSession:
-    """Dựng SparkSession dùng chung cho toàn bộ ETL Bronze->Silver.
-
-    Đọc config trực tiếp từ parser/config.py (module-level constant) —
-    hàm này thuộc I/O layer nên được phép đọc config trực tiếp (khác với
-    core luôn nhận tham số qua argument — Phương án B đã chốt cho Task 9).
-
-    2 phần cấu hình:
-      1. spark.jars — nạp JDBC driver (ghi Postgres, Task 12) + hadoop-aws
-         + aws-java-sdk-bundle (đọc s3a://, Task 11) cùng lúc.
-      2. fs.s3a.* — set qua tiền tố "spark.hadoop." để Spark tự đẩy vào
-         hadoopConfiguration() của SparkContext lúc khởi tạo, không cần
-         gọi tay spark.sparkContext._jsc.hadoopConfiguration().set(...)
-         sau khi session đã dựng xong.
-    """
-    builder = (
+    """Dựng SparkSession"""
+    return (
         SparkSession.builder.appName(SPARK_APP_NAME)
         .master(SPARK_MASTER)
         .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
         .config("spark.jars", _collect_jars(SPARK_JARS_DIR))
+        .getOrCreate()
     )
-
-    for key, value in get_spark_s3a_hadoop_conf().items():
-        builder = builder.config(f"spark.hadoop.{key}", value)
-
-    return builder.getOrCreate()
 
 
 # ---------------------------------------------------------------------------
 # Task 10 — parse_partition(): wrapper mapPartitions gọi parse_listing_html()
 # ---------------------------------------------------------------------------
 
-# Thứ tự cột PHẢI khớp _to_output_row() bên dưới — khớp đúng thứ tự cột
-# silver.listing_staging_batch (005_etl_bronze_to_silver_control.sql),
-# CHỈ THIẾU row_hash (Postgres tự tính, Spark không gửi giá trị này —
-# quyết định đã chốt ở Task 12b). Thêm error_reason/raw_html ở cuối cho
-# nhánh quarantine.
+# Thứ tự cột phải khớp _to_output_row() và silver.listing_staging_batch,
+# trừ row_hash (Postgres tự tính) và thêm error_reason/raw_html cho quarantine.
 UNIFIED_PARSE_SCHEMA = StructType(
     [
         StructField("listing_id", LongType(), nullable=True),
@@ -159,12 +117,9 @@ def _decimal_or_none(value: Optional[Decimal]) -> Optional[Decimal]:
 
 
 def _to_output_row(result) -> Row:
-    """Map ParsedListing | ParseError -> Row đúng thứ tự UNIFIED_PARSE_SCHEMA.
-
-    Không dùng dict trực tiếp (Row(**kwargs)) vì thứ tự field trong Row
-    dựng từ dict không đảm bảo khớp StructType khi Spark toDF(schema) —
-    an toàn nhất là liệt kê positional đúng thứ tự.
-    """
+    """Map ParsedListing | ParseError -> Row theo đúng thứ tự UNIFIED_PARSE_SCHEMA.
+    Không dùng dict (Row(**kwargs)) vì thứ tự field không đảm bảo khớp StructType,
+    an toàn nhất là liệt kê positional."""
     if isinstance(result, ParsedListing):
         return Row(
             result.listing_id,
@@ -224,17 +179,9 @@ def _to_output_row(result) -> Row:
 
 
 def parse_partition(source_part: str, source_bronze_key: str):
-    """Factory trả về hàm dùng cho rdd.mapPartitions() — đóng gói source_part/
-    source_bronze_key (cố định cho CẢ 1 file Bronze đang xử lý) qua closure,
-    vì parse_listing_html() cần 2 tham số này nhưng chúng KHÔNG có sẵn trong
-    từng dòng parquet (chỉ có url/crawl_date/html theo Bronze schema thống
-    nhất — xem source_and_bronze_analysis.md).
-
-    Dùng mapPartitions (không phải UDF) — lý do đã chốt ở Phase 2 Task 10:
-    ~30 field output không vectorize được (parser gọi BeautifulSoup per-
-    row), mapPartitions tránh overhead serialize từng row riêng lẻ như UDF
-    thường gặp phải.
-    """
+    """Factory cho rdd.mapPartitions(): đóng gói source_part/source_bronze_key qua closure
+    vì parse_listing_html() cần mà parquet không có. Dùng mapPartitions thay UDF để tránh
+    overhead serialize từng row (parser gọi BeautifulSoup per-row)."""
 
     def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
         for row in rows:
@@ -251,14 +198,9 @@ def parse_partition(source_part: str, source_bronze_key: str):
 
 
 # ---------------------------------------------------------------------------
-# Task 11 — Đọc 1 file parquet Bronze cụ thể từ S3 qua s3a:// (Phương án A)
+# Task 11 — Đọc 1 file parquet Bronze cụ thể từ S3
 # ---------------------------------------------------------------------------
 
-# Schema Bronze THỐNG NHẤT giữa DAG 1 (dataset) và DAG 2 (web) — theo
-# source_and_bronze_analysis.md: url, crawl_date, html (raw bytes, KHÔNG
-# Base64). Đây là "hợp đồng" giữa 2 DAG ingestion và parser chung — validate
-# ngay lúc đọc để fail sớm, rõ ràng, thay vì để lỗi lộ ra mù mờ sau này ở
-# Task 10 (vd AttributeError: 'Row' object has no attribute 'html').
 _BRONZE_REQUIRED_COLUMNS = {"url", "crawl_date", "html"}
 
 
@@ -268,44 +210,40 @@ def _validate_bronze_schema(df: DataFrame, s3_key: str) -> None:
     if missing:
         raise RuntimeError(
             f"File Bronze {s3_key!r} thiếu cột bắt buộc {missing} — "
-            f"cột hiện có: {sorted(actual_columns)}. Kiểm tra lại DAG "
-            "ingestion (dataset_loader/web_crawler) có đúng schema thống "
-            "nhất không."
+            f"cột hiện có: {sorted(actual_columns)}."
         )
 
 
 def read_bronze_parquet(spark: SparkSession, s3_key: str) -> DataFrame:
-    """Đọc 1 file parquet Bronze cụ thể từ S3 qua s3a:// (Phương án A đã
-    chốt — Spark đọc trực tiếp, không tải tạm qua boto3).
+    """Đọc 1 file parquet Bronze từ S3.
 
-    s3_key: đường dẫn tương đối trong bucket, vd
-    'bronze/dataset/part=1.parquet' hoặc 'bronze/web/2026-08-24/xxx.parquet'
-    — LUÔN đọc ĐÚNG 1 file cụ thể (không dùng wildcard '*.parquet') vì
-    control-plane (crawl.bronze_file_state, Task 18-19) xử lý theo TỪNG
-    file, cần biết chính xác file nào đang parse để update status đúng
-    dòng. Nếu Phase 5 cần tăng tốc, sẽ là run_etl_bronze_to_silver()
-    (Task 19) tự loop/submit song song gọi hàm này nhiều lần — không sửa
-    lại hàm này.
-
-    Chỉ select đúng 3 cột bắt buộc (không select(*)) — phòng trường hợp
-    file Bronze có thêm cột thừa ngoài dự kiến, giữ output luôn đúng hợp
-    đồng schema cho Task 10 (parse_partition() chỉ cần row.url/
-    row.crawl_date/row.html).
+    QUAN TRỌNG: phải .cache() + .count() ngay trong hàm trước khi tmp dir bị xoá,
+    vì Spark lazy. Nếu không ép vật chất hóa, action sau sẽ đọc lại file local
+    đã xoá -> lỗi "file not found".
     """
-    uri = s3a_uri(s3_key)
-    df = spark.read.parquet(uri)
-    _validate_bronze_schema(df, s3_key)
-    return df.select("url", "crawl_date", "html")
+
+    s3_client = boto3.client("s3")
+    bucket = get_s3_bucket()
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        local_path = os.path.join(tmp_dir, os.path.basename(s3_key))
+        s3_client.download_file(bucket, s3_key, local_path)
+
+        df = spark.read.parquet(local_path)
+        _validate_bronze_schema(df, s3_key)
+
+        result_df = df.select("url", "crawl_date", "html").cache()
+        result_df.count()  # ép vật chất hóa cache NGAY trong khối `with`
+
+    return result_df
 
 
 # ---------------------------------------------------------------------------
 # Task 12 — Split success/quarantine (12a) + ghi JDBC (12b)
 # ---------------------------------------------------------------------------
 
-# Cột thuộc silver.listing_staging_batch — đúng UNIFIED_PARSE_SCHEMA,
-# TRỪ error_reason/raw_html (chỉ quarantine mới có) và row_hash (Postgres
-# tự tính qua GENERATED STORED, Spark KHÔNG gửi giá trị này — quyết định
-# đã chốt Task 12b, tránh lệch công thức hash Python/Postgres).
+# Cột silver.listing_staging_batch theo UNIFIED_PARSE_SCHEMA,
+# trừ error_reason/raw_html (chỉ quarantine) và row_hash (Postgres tự tính).
 _STAGING_COLUMNS = [
     "listing_id", "listing_url", "source_part", "source_bronze_key",
     "crawl_date", "title", "listing_type", "property_type", "posted_date",
@@ -320,11 +258,8 @@ _STAGING_COLUMNS = [
 
 
 def split_success_and_quarantine(combined_df: DataFrame) -> tuple[DataFrame, DataFrame]:
-    """Task 12a — tách combined_df (output của Task 10, schema =
-    UNIFIED_PARSE_SCHEMA) thành 2 DataFrame dựa vào error_reason IS NULL,
-    thay vì gọi mapPartitions() 2 lần riêng (sẽ chạy parse_listing_html()
-    2 LẦN, tốn gấp đôi công parse HTML — đã loại phương án đó).
-    """
+    """Task 12a — tách combined_df thành 2 DataFrame theo error_reason IS NULL,
+    tránh gọi mapPartitions() 2 lần (không parse HTML gấp đôi)."""
     success_df = combined_df.filter(col("error_reason").isNull()).select(*_STAGING_COLUMNS)
 
     # parse_quarantine dùng tên cột "url" (không phải "listing_url") —
@@ -343,11 +278,8 @@ def split_success_and_quarantine(combined_df: DataFrame) -> tuple[DataFrame, Dat
 
 
 def _jdbc_url_and_properties(dsn: str) -> tuple[str, dict[str, str]]:
-    """Chuyển DSN dạng 'postgresql://user:pass@host:port/db' (dùng bởi
-    psycopg2, get_postgres_dsn()) sang jdbc:postgresql://host:port/db +
-    properties riêng user/password (Spark JDBC KHÔNG parse được DSN kiểu
-    psycopg2 trực tiếp, cần 2 phần tách biệt).
-    """
+    """Chuyển DSN psycopg2 ('postgresql://...') sang JDBC URL + user/password,
+    vì Spark JDBC không parse trực tiếp DSN psycopg2."""
     parsed = urlparse(dsn)
     jdbc_url = f"jdbc:postgresql://{parsed.hostname}:{parsed.port}{parsed.path}"
     properties = {
@@ -359,22 +291,11 @@ def _jdbc_url_and_properties(dsn: str) -> tuple[str, dict[str, str]]:
 
 
 def write_staging_and_quarantine(combined_df: DataFrame) -> tuple[int, int]:
-    """Task 12b — ghi 2 DataFrame vào silver.listing_staging_batch và
-    silver.parse_quarantine qua JDBC.
+    """Task 12b — ghi DataFrame vào silver.listing_staging_batch và silver.parse_quarantine qua JDBC.
 
-    Mode CHỈ 'append' — KHÔNG dùng 'overwrite' (SaveMode.Overwrite của
-    Spark JDBC sẽ DROP+CREATE lại bảng theo schema Spark tự suy luận,
-    XÓA MẤT cột GENERATED row_hash — đã loại phương án này ở bước phân
-    tích trước, xem row_hash trong 005_etl_bronze_to_silver_control.sql).
-
-    TRUNCATE silver.listing_staging_batch trước mỗi batch KHÔNG nằm
-    trong hàm này — đó là trách nhiệm của run_etl_bronze_to_silver()
-    (Phase 4, Task 19, orchestrator), giữ đúng single responsibility:
-    hàm này chỉ ghi, không quản lý vòng đời batch.
-
-    Trả về (success_count, quarantine_count) để Task 13 smoke test đối
-    chiếu với SELECT COUNT(*) thực tế trên Postgres.
-    """
+    Mode chỉ 'append' (không overwrite để giữ cột GENERATED row_hash).
+    TRUNCATE staging_batch trước mỗi batch do orchestrator quản lý, không nằm trong hàm này.
+    Trả về (success_count, quarantine_count) để Task 13 đối chiếu với COUNT(*) trên Postgres."""
     success_df, quarantine_df = split_success_and_quarantine(combined_df)
 
     # Cache trước khi count() + write() — tránh Spark chạy lại toàn bộ
