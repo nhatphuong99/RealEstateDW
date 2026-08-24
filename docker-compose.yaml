@@ -90,14 +90,17 @@ x-airflow-common:
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     PYTHONPATH: '/opt/airflow'
     JAVA_HOME: /usr/lib/jvm/default-java
-    SPARK_JDBC_JAR: /opt/spark-jars/postgresql-42.7.13.jar   # để bronze_to_silver_io.py đọc qua os.getenv()
+    SPARK_JARS_DIR: /opt/spark-jars   # parser/config.py glob toàn bộ jar trong này (JDBC + hadoop-aws + sdk-bundle)
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
     - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
     - ${AIRFLOW_PROJ_DIR:-.}/crawler:/opt/airflow/crawler
+    - ${AIRFLOW_PROJ_DIR:-.}/parser:/opt/airflow/parser
     - ${AIRFLOW_PROJ_DIR:-.}/scripts:/opt/airflow/scripts
+    - ${AIRFLOW_PROJ_DIR:-.}/config.py:/opt/airflow/config.py
+    - ${ENV_FILE_PATH:-.env}:/opt/airflow/.env:ro
   user: "${AIRFLOW_UID:-50000}:0"
   networks:
     - real-estate-network

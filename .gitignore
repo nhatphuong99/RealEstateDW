@@ -180,3 +180,5 @@ error_log.md
 pytest.ini
 tests/
 parse_to_staging.py
+smoke_test*.py
+
