@@ -98,6 +98,7 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
     - ${AIRFLOW_PROJ_DIR:-.}/crawler:/opt/airflow/crawler
     - ${AIRFLOW_PROJ_DIR:-.}/parser:/opt/airflow/parser
+    - ${AIRFLOW_PROJ_DIR:-.}/sql:/opt/airflow/sql
     - ${AIRFLOW_PROJ_DIR:-.}/scripts:/opt/airflow/scripts
     - ${AIRFLOW_PROJ_DIR:-.}/config.py:/opt/airflow/config.py
     - ${ENV_FILE_PATH:-.env}:/opt/airflow/.env:ro

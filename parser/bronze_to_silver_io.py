@@ -57,6 +57,13 @@ def build_spark_session() -> SparkSession:
         .master(SPARK_MASTER)
         .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
         .config("spark.jars", _collect_jars(SPARK_JARS_DIR))
+        # Tắt vectorized reader cho Parquet: cột `html` có độ dài thay đổi
+        # rất lớn giữa các bản ghi (nguyên trang HTML thô) -> vectorized
+        # reader gom nhiều dòng thành 1 khối bộ nhớ liên tục mỗi batch, dễ
+        # OOM khi vài dòng trong batch có HTML bất thường lớn (đã gặp ở
+        # part=2). Đọc row-based chậm hơn 1 chút nhưng ổn định hơn nhiều
+        # khi chạy full-scale 77 part không giám sát.
+        .config("spark.sql.parquet.enableVectorizedReader", "false")
         .getOrCreate()
     )
 
@@ -170,7 +177,7 @@ def _to_output_row(result) -> Row:
             None,  # source_part
             result.source_bronze_key,
             result.crawl_date,
-            *([None] * 28),  # title..address_district_old
+            *([None] * 30),  # title..address_district_old
             result.error_reason,
             result.raw_html,
         )
@@ -232,8 +239,8 @@ def read_bronze_parquet(spark: SparkSession, s3_key: str) -> DataFrame:
         df = spark.read.parquet(local_path)
         _validate_bronze_schema(df, s3_key)
 
-        result_df = df.select("url", "crawl_date", "html").cache()
-        result_df.count()  # ép vật chất hóa cache NGAY trong khối `with`
+        result_df = df.select("url", "crawl_date", "html").repartition(32).cache()
+        result_df.count() # ép vật chất hóa cache NGAY trong khối `with`
 
     return result_df
 
