@@ -25,6 +25,11 @@ from parser.bronze_to_silver_io import (
 )
 from parser.config import get_postgres_dsn, get_s3_bucket
 
+import time
+import logging
+
+logger = logging.getLogger(__name__)
+
 _BRONZE_PREFIX = "bronze/"
 _DATASET_PREFIX = "bronze/dataset/"
 _WEB_PREFIX = "bronze/web/"
@@ -154,59 +159,61 @@ def _run_scd2_merge(conn) -> None:
 
 
 def run_etl_bronze_to_silver(s3_key: str) -> None:
-    """Task 19 — điểm gọi duy nhất cho PythonOperator: gộp Phase 2 (Spark
-    parse Bronze -> Silver staging, Task 9-12) + Phase 3 (SQL merge SCD2,
-    Task 14) cho ĐÚNG 1 file Bronze (s3_key).
+    """Task 19 — điểm gọi duy nhất cho PythonOperator.
 
-    Xử lý 1 file/lần gọi (không lặp nhiều file trong hàm) để Task 20 dùng
+    Xử lý 1 file/lần gọi (không lặp nhiều file trong hàm) để dùng
     Airflow dynamic task mapping — mỗi file là 1 Task Instance độc lập,
     retry riêng file lỗi mà không kéo lại cả batch.
 
     Vòng đời crawl.bronze_file_state: pending -> processing -> done | failed.
-    Lỗi ở bất kỳ bước nào -> đánh dấu failed + last_error rồi raise lại để
-    Airflow tự retry (quyết định D1 — không tự viết retry loop).
+    Lỗi ở bất kỳ bước nào -> đánh dấu failed + last_error rồi raise lại để Airflow tự retry.
     """
+    t0 = time.perf_counter()
     conn = psycopg2.connect(get_postgres_dsn())
-    conn.autocommit = True  # từng UPDATE là 1 statement atomic riêng; script
-                            # merge SCD2 tự quản lý transaction của chính nó.
+    conn.autocommit = True
     try:
         _mark_processing(conn, s3_key)
 
         with conn.cursor() as cur:
-            # TRUNCATE là trách nhiệm orchestrator (đã chốt trong
-            # 005_etl_bronze_to_silver_control.sql), KHÔNG phải Phase 2.
             cur.execute("TRUNCATE silver.listing_staging_batch")
-
-            # parse_quarantine là log VĨNH VIỄN (append qua nhiều file, không
-            # TRUNCATE toàn bảng được) -> phải dọn riêng phần của đúng s3_key
-            # này để idempotent khi 1 file bị chạy lại (retry Airflow, hoặc
-            # smoke test tay) - cùng nguyên tắc đã áp dụng ở smoke_test.py.
             cur.execute(
                 "DELETE FROM silver.parse_quarantine WHERE source_bronze_key = %s",
                 (s3_key,),
-    )
+            )
 
+        t_build_start = time.perf_counter()
         spark = build_spark_session()
+        logger.info("[TIMING] build_spark_session: %.1fs", time.perf_counter() - t_build_start)
+
         try:
-            # trong run_etl_bronze_to_silver(), parser/bronze_file_state_io.py
+            t_read_start = time.perf_counter()
             bronze_df = read_bronze_parquet(spark, s3_key)
+            n_rows = bronze_df.count()  # đã cache rồi nên count() gần như free, chỉ để log số dòng
+            logger.info("[TIMING] read_bronze_parquet: %.1fs (%d dòng)",
+                        time.perf_counter() - t_read_start, n_rows)
+
+            t_parse_start = time.perf_counter()
             source_part = os.path.splitext(os.path.basename(s3_key))[0]
             parsed_rdd = bronze_df.rdd.mapPartitions(parse_partition(source_part, s3_key))
             combined_df = spark.createDataFrame(parsed_rdd, schema=UNIFIED_PARSE_SCHEMA)
-
             rows_parsed, rows_quarantined = write_staging_and_quarantine(combined_df)
+            logger.info("[TIMING] parse + write JDBC: %.1fs (parsed=%d, quarantined=%d)",
+                        time.perf_counter() - t_parse_start, rows_parsed, rows_quarantined)
 
-            bronze_df.unpersist()  # <-- THÊM: giải phóng cache HTML thô ngay sau khi
-                                    # write_staging_and_quarantine() đã dùng xong (success_df/
-                                    # quarantine_df cache riêng của nó không còn phụ thuộc bronze_df nữa)
+            bronze_df.unpersist()
         finally:
+            t_stop_start = time.perf_counter()
             spark.stop()
+            logger.info("[TIMING] spark.stop(): %.1fs", time.perf_counter() - t_stop_start)
 
+        t_merge_start = time.perf_counter()
         _run_scd2_merge(conn)
+        logger.info("[TIMING] SCD2 merge: %.1fs", time.perf_counter() - t_merge_start)
 
         _mark_done(conn, s3_key, rows_parsed, rows_quarantined)
+        logger.info("[TIMING] TỔNG: %.1fs cho file %s", time.perf_counter() - t0, s3_key)
 
-    except Exception as exc:  # noqa: BLE001 - cố tình bắt mọi lỗi để ghi last_error
+    except Exception as exc:
         _mark_failed(conn, s3_key, str(exc))
         raise
     finally:
