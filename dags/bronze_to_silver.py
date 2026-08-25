@@ -6,6 +6,7 @@ import pendulum
 from airflow import DAG
 from airflow.decorators import task
 
+from parser import config
 from parser.bronze_file_state_io import (
     discover_pending_files,
     get_pending_s3_keys,
@@ -14,7 +15,7 @@ from parser.bronze_file_state_io import (
 
 default_args = {
     "owner": "phuong",
-    "retries": 3,
+    "retries": 2,
     "retry_delay": timedelta(minutes=5),
 }
 
@@ -38,7 +39,10 @@ with DAG(
 
     # Task 3 (mapped) — 1 Task Instance/file, retry riêng file lỗi mà không
     # kéo lại cả batch (Task 19, lựa chọn A đã chốt).
-    run_etl = task(task_id="run_etl_bronze_to_silver")(run_etl_bronze_to_silver)
+    run_etl = task(
+        task_id="run_etl_bronze_to_silver",
+        max_active_tis_per_dag = config.SPARK_MAX_ACTIVE_TASKS,
+    )(run_etl_bronze_to_silver)
 
     discover >> keys
     run_etl.expand(s3_key=keys)

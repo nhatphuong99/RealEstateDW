@@ -24,7 +24,7 @@ from pyspark.sql.types import (
     StringType, StructField, StructType, TimestampType,
 )
 
-from parser.bronze_to_silver_core import ParseError, ParsedListing, parse_listing_html
+from parser.bronze_to_silver_core import ParseError, ParsedListing, is_in_scope, parse_listing_html
 from parser.config import (
     SPARK_APP_NAME,
     SPARK_DRIVER_MEMORY,
@@ -60,8 +60,8 @@ def build_spark_session() -> SparkSession:
         # Tắt vectorized reader cho Parquet: cột `html` có độ dài thay đổi
         # rất lớn giữa các bản ghi (nguyên trang HTML thô) -> vectorized
         # reader gom nhiều dòng thành 1 khối bộ nhớ liên tục mỗi batch, dễ
-        # OOM khi vài dòng trong batch có HTML bất thường lớn (đã gặp ở
-        # part=2). Đọc row-based chậm hơn 1 chút nhưng ổn định hơn nhiều
+        # OOM khi vài dòng trong batch có HTML bất thường lớn
+        # Đọc row-based chậm hơn 1 chút nhưng ổn định hơn nhiều
         # khi chạy full-scale 77 part không giám sát.
         .config("spark.sql.parquet.enableVectorizedReader", "false")
         .getOrCreate()
@@ -88,12 +88,12 @@ UNIFIED_PARSE_SCHEMA = StructType(
         StructField("price_vnd", DecimalType(16, 0), nullable=True),
         StructField("price_raw", StringType(), nullable=True),
         StructField("price_is_negotiable", BooleanType(), nullable=True),
-        StructField("area_m2", DecimalType(10, 2), nullable=True),
+        StructField("area_m2", DecimalType(12, 2), nullable=True),
         StructField("area_raw", StringType(), nullable=True),
         StructField("area_is_undetermined", BooleanType(), nullable=True),
-        StructField("length_m", DecimalType(6, 2), nullable=True),
-        StructField("width_m", DecimalType(6, 2), nullable=True),
-        StructField("street_width_m", DecimalType(6, 2), nullable=True),
+        StructField("length_m", DecimalType(12, 2), nullable=True),
+        StructField("width_m", DecimalType(12, 2), nullable=True),
+        StructField("street_width_m", DecimalType(12, 2), nullable=True),
         StructField("floors", ShortType(), nullable=True),
         StructField("bedrooms", ShortType(), nullable=True),
         StructField("orientation", StringType(), nullable=True),
@@ -199,6 +199,10 @@ def parse_partition(source_part: str, source_bronze_key: str):
                 source_part=source_part,
                 source_bronze_key=source_bronze_key,
             )
+            # Tin ngoài phạm vi đồ án -> bỏ qua lặng lẽ,
+            # KHÔNG ghi staging lẫn quarantine, giảm khối lượng ETL.
+            if isinstance(result, ParsedListing) and not is_in_scope(result):
+                continue
             yield _to_output_row(result)
 
     return _process_partition
@@ -239,7 +243,7 @@ def read_bronze_parquet(spark: SparkSession, s3_key: str) -> DataFrame:
         df = spark.read.parquet(local_path)
         _validate_bronze_schema(df, s3_key)
 
-        result_df = df.select("url", "crawl_date", "html").repartition(32).cache()
+        result_df = df.select("url", "crawl_date", "html").repartition(8).cache()
         result_df.count() # ép vật chất hóa cache NGAY trong khối `with`
 
     return result_df

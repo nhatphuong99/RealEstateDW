@@ -27,6 +27,7 @@ get_s3_bucket = root_config.get_s3_bucket
 RUNNING_IN_CONTAINER = root_config.RUNNING_IN_CONTAINER
 AWS_REGION = root_config.AWS_REGION
 
+SPARK_MAX_ACTIVE_TASKS = 1
 
 # ---------------------------------------------------------------------
 # SparkSession (Task 9)

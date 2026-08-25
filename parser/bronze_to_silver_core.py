@@ -102,6 +102,7 @@ def parse_vn_number(text: Optional[str]) -> Optional[Decimal]:
     - Không ',' -> '.' theo nhóm 3 chữ số là hàng nghìn.
     - Không dấu -> parse thẳng số.
     - Ký hiệu thiếu dữ liệu ('---','-','_','') -> None.
+    - Là số âm -> None.
     """
     if text is None:
         return None
@@ -117,13 +118,16 @@ def parse_vn_number(text: Optional[str]) -> Optional[Decimal]:
     if "," in cleaned:
         cleaned = cleaned.replace(".", "")  # '.' (nếu có) là hàng nghìn, bỏ trước
         cleaned = cleaned.replace(",", ".")  # ',' là thập phân
-    elif "." in cleaned and re.fullmatch(r"\d{1,3}(\.\d{3})+", cleaned):
+    elif "." in cleaned and re.fullmatch(r"-?\d{1,3}(\.\d{3})+", cleaned):
         cleaned = cleaned.replace(".", "")
     # còn lại (có '.' nhưng không đúng dạng nhóm-3-chữ-số, hoặc không dấu
     # nào) -> giữ nguyên, Decimal() tự parse.
 
     try:
-        return Decimal(cleaned)
+        value = Decimal(cleaned)
+        if value < 0:
+            return None
+        return value
     except InvalidOperation:
         return None
 
@@ -163,6 +167,19 @@ def remove_special_characters(text: str) -> str:
 # nên không dựa vào vị trí cố định mà ghép theo thứ tự xuất hiện.
 # ---------------------------------------------------------------------------
 
+def _parse_moreinfor_table(section: Tag) -> dict[str, Tag]:
+    result: dict[str, Tag] = {}
+    table = section.find("table")
+    if table is None:
+        return result
+    for row in table.find_all("tr"):
+        cells = row.find_all("td")
+        for i in range(0, len(cells) - 1, 2):
+            label = _get_text(cells[i])
+            if label:
+                result[label] = cells[i + 1]
+    return result
+
 
 def parse_old_address(raw: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     """Tách (ward_old, district_old) từ address_old_raw dạng 
@@ -179,22 +196,24 @@ def parse_old_address(raw: Optional[str]) -> tuple[Optional[str], Optional[str]]
     return ward_old, district_old
 
 
-def _parse_moreinfor_table(section: Tag) -> dict[str, Tag]:
-    result: dict[str, Tag] = {}
-    table = section.find("table")
-    if table is None:
-        return result
-    for row in table.find_all("tr"):
-        cells = row.find_all("td")
-        for i in range(0, len(cells) - 1, 2):
-            label = _get_text(cells[i])
-            if label:
-                result[label] = cells[i + 1]
-    return result
+IN_SCOPE_PROVINCE = "Hồ Chí Minh"
+IN_SCOPE_LISTING_TYPES = {"Cần bán", "Cần bán"}
+IN_SCOPE_PROPERTY_TYPES = {
+    "Biệt thự, nhà liền kề",
+    "Căn hộ chung cư",
+    "Nhà mặt tiền",
+    "Nhà trong hẻm",
+    "Phòng trọ, nhà trọ",
+}
 
-
-_LISTING_TYPE_MAP = {"Cần bán": "sale", "Cho thuê": "rent"}
-
+def is_in_scope(listing: ParsedListing) -> bool:
+    """Kiểm tra tin đăng có thuộc phạm vi đồ án không. Ngoài phạm vi — bị bỏ qua lặng lẽ
+    ở parse_partition(), không ghi vào staging lẫn quarantine."""
+    return (
+        listing.address_province_new == IN_SCOPE_PROVINCE
+        and listing.listing_type in IN_SCOPE_LISTING_TYPES
+        and listing.property_type in IN_SCOPE_PROPERTY_TYPES
+    )
 
 def parse_listing_html(
     html: bytes,
@@ -232,11 +251,10 @@ def parse_listing_html(
 
     title_tag = article.find(attrs={"itemprop": "name"})
     title = remove_special_characters(_get_text(title_tag))
-    if not title:
+    if title is None:
         return _fail("thieu title (itemprop=name)")
 
-    # posted_date: BẮT BUỘC lấy attribute datetime, KHÔNG lấy text hiển thị
-    # (text có thể là "Hôm nay"/"Hôm qua", không parse được thành ngày).
+    # posted_date: BẮT BUỘC lấy attribute datetime, (text có thể là "Hôm nay"/"Hôm qua").
     time_tag = article.find("time", attrs={"itemprop": "datePosted"})
     if time_tag is None or not time_tag.get("datetime"):
         return _fail("thieu <time itemprop=datePosted datetime=...>")
@@ -291,15 +309,12 @@ def parse_listing_html(
         return _fail("thieu section.moreinfor1")
     fields = _parse_moreinfor_table(moreinfor_section)
 
-    listing_type_raw = _get_text(fields.get("Loại tin"))
-    listing_type = _LISTING_TYPE_MAP.get(listing_type_raw)
+    listing_type = _get_text(fields.get("Loại tin"))
     if listing_type is None:
-        # Đúng nguyên tắc đã chốt: chỉ giữ "Cần bán"/"Cho thuê", loại bỏ
-        # "Cần mua"/"Cần thuê" (demand-side) và mọi giá trị lạ khác.
-        return _fail(f"listing_type khong hop le (demand-side hoac loi parse): {listing_type_raw!r}")
+        return _fail(f"thieu 'Loai tin' trong bang moreinfor1")
 
     property_type = _get_text(fields.get("Loại BDS"))
-    if not property_type:
+    if property_type is None:
         return _fail("thieu 'Loai BDS' trong bang moreinfor1")
 
     def _num(label: str) -> Optional[Decimal]:

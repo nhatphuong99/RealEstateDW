@@ -52,7 +52,7 @@ CREATE TABLE silver.listing_history (
     price_is_negotiable BOOLEAN NOT NULL DEFAULT FALSE,
 
     -- Diện tích (SCD2)
-    area_m2 NUMERIC(10,2),
+    area_m2 NUMERIC(15,2),
     area_raw TEXT,
     area_is_undetermined BOOLEAN NOT NULL DEFAULT FALSE,
 
@@ -64,9 +64,9 @@ CREATE TABLE silver.listing_history (
         ) STORED,
 
     -- Kích thước
-    length_m NUMERIC(6,2),
-    width_m NUMERIC(6,2),
-    street_width_m NUMERIC(6,2),
+    length_m NUMERIC(12,2),
+    width_m NUMERIC(12,2),
+    street_width_m NUMERIC(12,2),
     floors SMALLINT,
     bedrooms SMALLINT,
 
