@@ -197,7 +197,7 @@ def parse_old_address(raw: Optional[str]) -> tuple[Optional[str], Optional[str]]
 
 
 IN_SCOPE_PROVINCE = "Hồ Chí Minh"
-IN_SCOPE_LISTING_TYPES = {"Cần bán", "Cần bán"}
+IN_SCOPE_LISTING_TYPES = {"Cần bán", "Cho thuê"}
 IN_SCOPE_PROPERTY_TYPES = {
     "Biệt thự, nhà liền kề",
     "Căn hộ chung cư",

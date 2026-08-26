@@ -57,11 +57,8 @@ def build_spark_session() -> SparkSession:
         .master(SPARK_MASTER)
         .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
         .config("spark.jars", _collect_jars(SPARK_JARS_DIR))
-        # Tắt vectorized reader cho Parquet: cột `html` có độ dài thay đổi
-        # rất lớn giữa các bản ghi -> vectorized  reader gom nhiều dòng thành 
-        # 1 khối bộ nhớ liên tục mỗi batch, dễ OOM khi vài dòng trong batch có HTML bất thường lớn
-        # Đọc row-based chậm hơn 1 chút nhưng ổn định hơn nhiều
-        # khi chạy full-scale 77 part không giám sát.
+        # Tắt vectorized reader cho Parquet: cột `html` có độ dài biến động lớn,
+        # dễ OOM khi batch gặp HTML bất thường. Row-based chậm hơn chút nhưng ổn định hơn.
         .config("spark.sql.parquet.enableVectorizedReader", "false")
         .getOrCreate()
     )
