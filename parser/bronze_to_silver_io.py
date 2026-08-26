@@ -26,6 +26,7 @@ from pyspark.sql.types import (
 
 from parser.bronze_to_silver_core import ParseError, ParsedListing, is_in_scope, parse_listing_html
 from parser.config import (
+    BRONZE_TMP_DIR_PREFIX,
     SPARK_APP_NAME,
     SPARK_DRIVER_MEMORY,
     SPARK_JARS_DIR,
@@ -228,7 +229,7 @@ def download_bronze_file(s3_key: str) -> tempfile.TemporaryDirectory:
     read, chạy TRƯỚC khi JVM khởi động, tránh JVM chiếm CPU làm nghẽn download qua boto3."""
     s3_client = boto3.client("s3")
     bucket = get_s3_bucket()
-    tmp_dir = tempfile.TemporaryDirectory()
+    tmp_dir = tempfile.TemporaryDirectory(prefix=BRONZE_TMP_DIR_PREFIX)
     local_path = os.path.join(tmp_dir.name, os.path.basename(s3_key))
     s3_client.download_file(bucket, s3_key, local_path)
     return tmp_dir

@@ -29,6 +29,8 @@ AWS_REGION = root_config.AWS_REGION
 
 SPARK_MAX_ACTIVE_TASKS = 1
 
+BRONZE_TMP_DIR_PREFIX = "bronze_dl_"
+
 # ---------------------------------------------------------------------
 # SparkSession (Task 9)
 # ---------------------------------------------------------------------

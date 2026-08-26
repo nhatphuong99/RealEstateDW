@@ -24,8 +24,10 @@ from parser.bronze_to_silver_io import (
     read_bronze_parquet,
     write_staging_and_quarantine,
 )
-from parser.config import get_postgres_dsn, get_s3_bucket
+from parser.config import BRONZE_TMP_DIR_PREFIX, get_postgres_dsn, get_s3_bucket
 
+import shutil
+import tempfile
 import time
 import logging
 
@@ -104,6 +106,31 @@ def discover_pending_files() -> int:
         conn.close()
 
     return len(inserted)
+
+
+def cleanup_orphaned_tmp_dirs(max_age_hours: float = 12.0) -> int:
+    """Xóa thư mục /tmp/bronze_dl_* còn sót lại từ lần chạy trước bị kill cứng. 
+    Chỉ động vào đúng prefix 'bronze_dl_' — an toàn với tmp dir khác trong cùng container.
+
+    Trả về số thư mục đã xóa."""
+    base_tmp_dir = tempfile.gettempdir()
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+
+    for entry in os.scandir(base_tmp_dir):
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        if not entry.name.startswith(BRONZE_TMP_DIR_PREFIX):
+            continue
+        try:
+            if entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry.path, ignore_errors=True)
+                removed += 1
+        except FileNotFoundError:
+            # Đã bị xóa bởi tiến trình/lần chạy khác giữa lúc scan và stat — bỏ qua.
+            continue
+
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -240,5 +267,27 @@ def get_pending_s3_keys() -> list[str]:
                 "ORDER BY discovered_at"
             )
             return [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def reset_stuck_files() -> int:
+    """Reset file bị kẹt ở 'failed' (hết retry Airflow) hoặc 'processing' 
+    (task bị kill giữa chừng, chưa kịp update status) về lại 'pending'.
+
+    cur.rowcount ở đây tin cậy được vì là UPDATE đơn (không phải executemany).
+    """
+    conn = psycopg2.connect(get_postgres_dsn())
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE crawl.bronze_file_state
+                    SET status = 'pending', last_error = NULL
+                    WHERE status IN ('failed', 'processing')
+                    """
+                )
+                return cur.rowcount
     finally:
         conn.close()
