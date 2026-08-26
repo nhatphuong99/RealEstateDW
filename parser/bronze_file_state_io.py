@@ -188,6 +188,7 @@ def run_etl_bronze_to_silver(s3_key: str) -> None:
         try:
             local_path = os.path.join(tmp_dir.name, os.path.basename(s3_key))
 
+            t_build_start = time.perf_counter()
             spark = build_spark_session()
             logger.info("[TIMING] build_spark_session: %.1fs", time.perf_counter() - t_build_start)
 
