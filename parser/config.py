@@ -33,6 +33,6 @@ SPARK_MAX_ACTIVE_TASKS = 1
 # SparkSession (Task 9)
 # ---------------------------------------------------------------------
 SPARK_APP_NAME = os.getenv("SPARK_APP_NAME", "bronze_to_silver")
-SPARK_MASTER = os.getenv("SPARK_MASTER", "local[*]")
+SPARK_MASTER = os.getenv("SPARK_MASTER", "local[2]")
 SPARK_DRIVER_MEMORY = os.getenv("SPARK_DRIVER_MEMORY", "2g")
 SPARK_JARS_DIR = os.getenv("SPARK_JARS_DIR", "/opt/spark-jars")

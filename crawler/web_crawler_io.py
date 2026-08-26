@@ -97,6 +97,11 @@ PROPERTY_TYPES = (
 )
 
 
+def _sanitize_run_id_for_key(run_id: str) -> str:
+    """Làm sạch run_id trước khi dùng trong S3 key."""
+    return run_id.replace(":", "-").replace("+00:00", "Z").replace("+", "-")
+
+
 class PsycopgControlPlaneRepo:
     """Implement ControlPlaneRepo bằng psycopg2, thao tác schema `crawl` trong `postgres-dw`.
 
@@ -349,10 +354,10 @@ class S3ParquetBufferWriter:
         self._records.append(record)
 
     def _inprogress_key(self, run_id: str, crawl_date: date) -> str:
-        return f"bronze/web/date={crawl_date.isoformat()}/part-{run_id}.parquet.inprogress"
+        return f"bronze/web/date={crawl_date.isoformat()}/part-{_sanitize_run_id_for_key(run_id)}.parquet.inprogress"
 
     def _final_key(self, run_id: str, crawl_date: date) -> str:
-        return f"bronze/web/date={crawl_date.isoformat()}/part-{run_id}.parquet"
+        return f"bronze/web/date={crawl_date.isoformat()}/part-{_sanitize_run_id_for_key(run_id)}.parquet"
 
     def _serialize_current_buffer(self) -> bytes:
         table = pa.table(

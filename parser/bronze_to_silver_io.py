@@ -58,9 +58,8 @@ def build_spark_session() -> SparkSession:
         .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
         .config("spark.jars", _collect_jars(SPARK_JARS_DIR))
         # Tắt vectorized reader cho Parquet: cột `html` có độ dài thay đổi
-        # rất lớn giữa các bản ghi (nguyên trang HTML thô) -> vectorized
-        # reader gom nhiều dòng thành 1 khối bộ nhớ liên tục mỗi batch, dễ
-        # OOM khi vài dòng trong batch có HTML bất thường lớn
+        # rất lớn giữa các bản ghi -> vectorized  reader gom nhiều dòng thành 
+        # 1 khối bộ nhớ liên tục mỗi batch, dễ OOM khi vài dòng trong batch có HTML bất thường lớn
         # Đọc row-based chậm hơn 1 chút nhưng ổn định hơn nhiều
         # khi chạy full-scale 77 part không giám sát.
         .config("spark.sql.parquet.enableVectorizedReader", "false")
@@ -225,27 +224,26 @@ def _validate_bronze_schema(df: DataFrame, s3_key: str) -> None:
         )
 
 
-def read_bronze_parquet(spark: SparkSession, s3_key: str) -> DataFrame:
-    """Đọc 1 file parquet Bronze từ S3.
-
-    QUAN TRỌNG: phải .cache() + .count() ngay trong hàm trước khi tmp dir bị xoá,
-    vì Spark lazy. Nếu không ép vật chất hóa, action sau sẽ đọc lại file local
-    đã xoá -> lỗi "file not found".
-    """
-
+def download_bronze_file(s3_key: str) -> tempfile.TemporaryDirectory:
+    """Tải 1 file Bronze từ S3 về thư mục tạm local, KHÔNG cần SparkSession.
+    Trả về TemporaryDirectory (caller giữ tham chiếu để tự cleanup sau khi
+    Spark đọc xong — tránh xoá sớm khi Spark còn lazy-read). Tách khỏi Spark
+    read, chạy TRƯỚC khi JVM khởi động, tránh JVM chiếm CPU làm nghẽn download qua boto3."""
     s3_client = boto3.client("s3")
     bucket = get_s3_bucket()
+    tmp_dir = tempfile.TemporaryDirectory()
+    local_path = os.path.join(tmp_dir.name, os.path.basename(s3_key))
+    s3_client.download_file(bucket, s3_key, local_path)
+    return tmp_dir
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        local_path = os.path.join(tmp_dir, os.path.basename(s3_key))
-        s3_client.download_file(bucket, s3_key, local_path)
 
-        df = spark.read.parquet(local_path)
-        _validate_bronze_schema(df, s3_key)
-
-        result_df = df.select("url", "crawl_date", "html").repartition(8).cache()
-        result_df.count() # ép vật chất hóa cache NGAY trong khối `with`
-
+def read_bronze_parquet(spark: SparkSession, local_path: str, s3_key: str) -> DataFrame:
+    """Đọc file parquet Bronze ĐÃ TẢI SẴN vào Spark DataFrame. 
+    Vẫn phải .cache() + .count() ngay trong hàm (lý do lazy evaluation)."""
+    df = spark.read.parquet(local_path)
+    _validate_bronze_schema(df, s3_key)
+    result_df = df.select("url", "crawl_date", "html").repartition(8).cache()
+    result_df.count()
     return result_df
 
 

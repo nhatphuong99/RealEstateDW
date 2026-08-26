@@ -19,6 +19,7 @@ from psycopg2.extras import execute_values
 from parser.bronze_to_silver_io import (
     UNIFIED_PARSE_SCHEMA,
     build_spark_session,
+    download_bronze_file,
     parse_partition,
     read_bronze_parquet,
     write_staging_and_quarantine,
@@ -181,30 +182,38 @@ def run_etl_bronze_to_silver(s3_key: str) -> None:
                 (s3_key,),
             )
 
-        t_build_start = time.perf_counter()
-        spark = build_spark_session()
-        logger.info("[TIMING] build_spark_session: %.1fs", time.perf_counter() - t_build_start)
-
+        # Tải file Bronze về local TRƯỚC khi khởi động Spark — tránh JVM
+        # chiếm CPU làm nghẽn download qua boto3 (xem error_log.md).
+        tmp_dir = download_bronze_file(s3_key)
         try:
-            t_read_start = time.perf_counter()
-            bronze_df = read_bronze_parquet(spark, s3_key)
-            n_rows = bronze_df.count()  # đã cache rồi nên count() gần như free, chỉ để log số dòng
-            logger.info("[TIMING] read_bronze_parquet: %.1fs (%d dòng)",
-                        time.perf_counter() - t_read_start, n_rows)
+            local_path = os.path.join(tmp_dir.name, os.path.basename(s3_key))
 
-            t_parse_start = time.perf_counter()
-            source_part = os.path.splitext(os.path.basename(s3_key))[0]
-            parsed_rdd = bronze_df.rdd.mapPartitions(parse_partition(source_part, s3_key))
-            combined_df = spark.createDataFrame(parsed_rdd, schema=UNIFIED_PARSE_SCHEMA)
-            rows_parsed, rows_quarantined = write_staging_and_quarantine(combined_df)
-            logger.info("[TIMING] parse + write JDBC: %.1fs (parsed=%d, quarantined=%d)",
-                        time.perf_counter() - t_parse_start, rows_parsed, rows_quarantined)
+            spark = build_spark_session()
+            logger.info("[TIMING] build_spark_session: %.1fs", time.perf_counter() - t_build_start)
 
-            bronze_df.unpersist()
+            try:
+                t_read_start = time.perf_counter()
+                bronze_df = read_bronze_parquet(spark, local_path, s3_key)
+                n_rows = bronze_df.count()  # đã cache rồi nên count() gần như free, chỉ để log số dòng
+                logger.info("[TIMING] read_bronze_parquet: %.1fs (%d dòng)",
+                            time.perf_counter() - t_read_start, n_rows)
+
+                t_parse_start = time.perf_counter()
+                source_part = os.path.splitext(os.path.basename(s3_key))[0]
+                parsed_rdd = bronze_df.rdd.mapPartitions(parse_partition(source_part, s3_key))
+                combined_df = spark.createDataFrame(parsed_rdd, schema=UNIFIED_PARSE_SCHEMA)
+                rows_parsed, rows_quarantined = write_staging_and_quarantine(combined_df)
+                logger.info("[TIMING] parse + write JDBC: %.1fs (parsed=%d, quarantined=%d)",
+                            time.perf_counter() - t_parse_start, rows_parsed, rows_quarantined)
+
+                bronze_df.unpersist()
+            finally:
+                t_stop_start = time.perf_counter()
+                spark.stop()
+                logger.info("[TIMING] spark.stop(): %.1fs", time.perf_counter() - t_stop_start)
         finally:
-            t_stop_start = time.perf_counter()
-            spark.stop()
-            logger.info("[TIMING] spark.stop(): %.1fs", time.perf_counter() - t_stop_start)
+            tmp_dir.cleanup()
+
 
         t_merge_start = time.perf_counter()
         _run_scd2_merge(conn)

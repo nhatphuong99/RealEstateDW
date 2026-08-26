@@ -62,13 +62,15 @@ class CrawlerConfig:
     delay_min_seconds: float = 5.0         # delay khi dùng proxy
     delay_max_seconds: float = 10.0
 
-    # Retry cùng proxy chỉ cho FETCH_ERROR (lỗi mạng/server).
+    # Retry cùng proxy khi FETCH_ERROR (lỗi mạng/server).
     # Hết retry → dừng run ngay. PROXY_ISSUE (proxy chết/429/CAPTCHA)
     # đổi proxy ngay, lặp tới khi hết pool.
     max_fetch_error_retries: int = 3
 
     flush_interval_seconds: int = 10 * 60  # flush mỗi 10 phút
     flush_page_threshold: int = 100        # hoặc ~100 trang
+
+    min_success_pages: int = 10
 
 
 class StopReason(str, Enum):
@@ -154,6 +156,10 @@ class BronzeRecord:
 # ============================================================
 # 3. Hàm thuần (pure function) — parse HTML, không I/O thật
 # ============================================================
+
+def _sanitize_run_id_for_key(run_id: str) -> str:
+    """Làm sạch run_id trước khi dùng trong S3 key."""
+    return run_id.replace(":", "-").replace("+00:00", "Z").replace("+", "-")
 
 def compute_listing_page_url(listing_type: str, property_type: str, page: int) -> str:
     """Tính URL trang danh sách bằng số học (B6), không dùng link phân trang."""
