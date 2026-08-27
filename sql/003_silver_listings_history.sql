@@ -1,5 +1,5 @@
 -- ============================================================================
--- 003_silver_listing_history.sql (REVISED v2)
+-- 003_silver_listing_history.sql (REVISED v3)
 -- Bảng lịch sử tin đăng (Silver layer), SCD Type 2 trên 5 trường biến động.
 -- Idempotent.
 -- ============================================================================
@@ -52,21 +52,22 @@ CREATE TABLE silver.listing_history (
     price_is_negotiable BOOLEAN NOT NULL DEFAULT FALSE,
 
     -- Diện tích (SCD2)
-    area_m2 NUMERIC(15,2),
+    area_m2 NUMERIC(10,2),
     area_raw TEXT,
     area_is_undetermined BOOLEAN NOT NULL DEFAULT FALSE,
+    area_is_outlier BOOLEAN NOT NULL DEFAULT FALSE,   -- MỚI: area_m2 gốc > 10.000m2, đã null hóa
 
     -- Giá/m2 (GENERATED)
-    price_per_m2_vnd NUMERIC(16,2)
+    price_per_m2_vnd NUMERIC(15,2)
         GENERATED ALWAYS AS (
             CASE WHEN area_is_undetermined OR area_m2 IS NULL OR area_m2=0 OR price_vnd IS NULL
                  THEN NULL ELSE ROUND(price_vnd/area_m2,2) END
         ) STORED,
 
-    -- Kích thước
-    length_m NUMERIC(12,2),
-    width_m NUMERIC(12,2),
-    street_width_m NUMERIC(12,2),
+    -- Kích thước (đã sanitize ở tầng parser: null hóa nếu ngoài ngưỡng hợp lý vật lý)
+    length_m NUMERIC(6,2),
+    width_m NUMERIC(6,2),
+    street_width_m NUMERIC(6,2),
     floors SMALLINT,
     bedrooms SMALLINT,
 
@@ -118,6 +119,10 @@ COMMENT ON TABLE silver.listing_history IS
 COMMENT ON COLUMN silver.listing_history.price_vnd IS
     'NULL khi price_is_negotiable=TRUE (KHÔNG dùng 0 — xem CHECK constraint chk_price_negotiable_null). '
     'NULL giúp AVG()/SUM() ở Gold tự loại trừ tin thỏa thuận mà không cần filter thủ công.';
+COMMENT ON COLUMN silver.listing_history.area_is_outlier IS
+    'TRUE khi area_m2 gốc parse được nhưng > 10.000m2 (ngoài phạm vi đồ án, không gồm đất nền) '
+    '— đã bị null hóa tại tầng parser (_sanitize_area). Phát hiện qua review Phase 5 '
+    '(VD thực tế: listing_id=18905935, area gốc=989.593m2).';
 COMMENT ON COLUMN silver.listing_history.row_hash IS
     'GENERATED STORED, gọi silver.compute_row_hash() — 1 nguồn sự thật duy nhất, dùng chung với '
     'silver.listing_staging_batch. Parser Spark/Python KHÔNG tự tính MD5.';

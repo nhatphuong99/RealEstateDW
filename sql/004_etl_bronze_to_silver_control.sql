@@ -1,5 +1,5 @@
 -- ============================================================================
--- sql/005_etl_bronze_to_silver_control.sql
+-- sql/004_etl_bronze_to_silver_control.sql
 -- Control-plane + staging + quarantine cho DAG 3 (bronze_to_silver).
 -- 3 bảng: bronze_file_state (trạng thái parse), listing_staging_batch (landing zone),
 -- parse_quarantine (ghi lỗi parse). Idempotent. Phải chạy sau 003_silver_listings_history.sql.
@@ -45,13 +45,14 @@ CREATE UNLOGGED TABLE IF NOT EXISTS silver.listing_staging_batch (
     price_raw               TEXT,
     price_is_negotiable      BOOLEAN      NOT NULL DEFAULT FALSE,
 
-    area_m2                  NUMERIC(15, 2),
+    area_m2                  NUMERIC(10, 2),
     area_raw                  TEXT,
     area_is_undetermined       BOOLEAN      NOT NULL DEFAULT FALSE,
+    area_is_outlier              BOOLEAN      NOT NULL DEFAULT FALSE,   -- MỚI, đồng bộ với silver.listing_history
 
-    length_m                 NUMERIC(12, 2),
-    width_m                   NUMERIC(12, 2),
-    street_width_m             NUMERIC(12, 2),
+    length_m                 NUMERIC(6, 2),
+    width_m                   NUMERIC(6, 2),
+    street_width_m             NUMERIC(6, 2),
     floors                    SMALLINT,
     bedrooms                  SMALLINT,
 

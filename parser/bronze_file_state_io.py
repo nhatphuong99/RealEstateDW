@@ -42,7 +42,7 @@ _MERGE_SCD2_SQL_PATH = _PROJECT_ROOT / "sql" / "queries" / "merge_scd2_listing_h
 
 
 # ---------------------------------------------------------------------------
-# Task 18 — discover_pending_files (đã hoàn thành, PASS smoke test)
+#   discover_pending_files
 # ---------------------------------------------------------------------------
 
 
@@ -72,7 +72,7 @@ def list_bronze_parquet_keys(s3_client=None) -> list[str]:
 
 
 def discover_pending_files() -> int:
-    """Task 18 — quét S3, insert key Bronze mới vào crawl.bronze_file_state
+    """Quét S3, insert key Bronze mới vào crawl.bronze_file_state
     với status='pending' (giá trị DEFAULT của cột).
 
     Idempotent qua INSERT ... ON CONFLICT (s3_key) DO NOTHING (s3_key là
@@ -134,7 +134,7 @@ def cleanup_orphaned_tmp_dirs(max_age_hours: float = 12.0) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Task 19 — run_etl_bronze_to_silver: gộp Phase 2 + Phase 3 cho 1 file
+#   run_etl_bronze_to_silver
 # ---------------------------------------------------------------------------
 
 
@@ -178,12 +178,16 @@ def _mark_failed(conn, s3_key: str, error_message: str) -> None:
 
 def _run_scd2_merge(conn) -> None:
     """Chạy nguyên văn merge_scd2_listing_history.sql — file này đã tự bọc
-    BEGIN;...COMMIT; riêng (xem sql/queries/merge_scd2_listing_history.sql),
-    nên conn PHẢI ở chế độ autocommit=True để không bị lồng transaction
+    BEGIN;...COMMIT; riêng, nên conn PHẢI ở chế độ autocommit=True để không bị lồng transaction
     (psycopg2 mặc định tự mở transaction ngầm nếu autocommit=False)."""
     sql_text = _MERGE_SCD2_SQL_PATH.read_text(encoding="utf-8")
     with conn.cursor() as cur:
         cur.execute(sql_text)
+
+def _truncate_staging_after_success(conn) -> None:
+    """Dọn silver.listing_staging_batch NGAY sau khi merge SCD2 thành công."""
+    with conn.cursor() as cur:
+        cur.execute("TRUNCATE silver.listing_staging_batch")
 
 
 def run_etl_bronze_to_silver(s3_key: str) -> None:
@@ -210,7 +214,7 @@ def run_etl_bronze_to_silver(s3_key: str) -> None:
             )
 
         # Tải file Bronze về local TRƯỚC khi khởi động Spark — tránh JVM
-        # chiếm CPU làm nghẽn download qua boto3 (xem error_log.md).
+        # chiếm CPU làm nghẽn download qua boto3.
         tmp_dir = download_bronze_file(s3_key)
         try:
             local_path = os.path.join(tmp_dir.name, os.path.basename(s3_key))
@@ -247,6 +251,14 @@ def run_etl_bronze_to_silver(s3_key: str) -> None:
         _run_scd2_merge(conn)
         logger.info("[TIMING] SCD2 merge: %.1fs", time.perf_counter() - t_merge_start)
 
+        try:
+            _truncate_staging_after_success(conn)
+        except Exception as cleanup_exc:  # noqa: BLE001
+            logger.warning(
+                "[CLEANUP] Truncate staging sau merge thất bại cho %s (không crash task): %s",
+                s3_key, cleanup_exc,
+            )
+
         _mark_done(conn, s3_key, rows_parsed, rows_quarantined)
         logger.info("[TIMING] TỔNG: %.1fs cho file %s", time.perf_counter() - t0, s3_key)
 
@@ -258,7 +270,7 @@ def run_etl_bronze_to_silver(s3_key: str) -> None:
 
 def get_pending_s3_keys() -> list[str]:
     """Lấy danh sách s3_key đang status='pending' trong crawl.bronze_file_state,
-    dùng làm input cho .expand() của task run_etl_bronze_to_silver (Task 20)."""
+    dùng làm input cho .expand() của task run_etl_bronze_to_silver."""
     conn = psycopg2.connect(get_postgres_dsn())
     try:
         with conn.cursor() as cur:
