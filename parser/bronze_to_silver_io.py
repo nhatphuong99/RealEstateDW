@@ -142,7 +142,7 @@ def _to_output_row(result) -> Row:
             _decimal_or_none(result.area_m2),
             result.area_raw,
             result.area_is_undetermined,
-            result.area_is_outlier,   # MỚI
+            result.area_is_outlier,   
             _decimal_or_none(result.length_m),
             _decimal_or_none(result.width_m),
             _decimal_or_none(result.street_width_m),
@@ -176,7 +176,7 @@ def _to_output_row(result) -> Row:
             None,  # source_part
             result.source_bronze_key,
             result.crawl_date,
-            *([None] * 30),  # title..address_district_old
+            *([None] * 31),  # title..address_district_old
             result.error_reason,
             result.raw_html,
         )
@@ -257,7 +257,7 @@ _STAGING_COLUMNS = [
     "listing_id", "listing_url", "source_part", "source_bronze_key",
     "crawl_date", "title", "listing_type", "property_type", "posted_date",
     "price_vnd", "price_raw", "price_is_negotiable", "area_m2", "area_raw",
-    "area_is_undetermined", "length_m", "width_m", "street_width_m",
+    "area_is_undetermined", "area_is_outlier", "length_m", "width_m", "street_width_m",
     "floors", "bedrooms", "orientation", "legal_status", "has_dining_room",
     "has_kitchen", "has_rooftop", "has_car_parking", "owner_direct",
     "is_expired", "has_warning", "address_street_new", "address_ward_new",

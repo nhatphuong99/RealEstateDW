@@ -157,10 +157,6 @@ class BronzeRecord:
 # 3. Hàm thuần (pure function) — parse HTML, không I/O thật
 # ============================================================
 
-def _sanitize_run_id_for_key(run_id: str) -> str:
-    """Làm sạch run_id trước khi dùng trong S3 key."""
-    return run_id.replace(":", "-").replace("+00:00", "Z").replace("+", "-")
-
 def compute_listing_page_url(listing_type: str, property_type: str, page: int) -> str:
     """Tính URL trang danh sách bằng số học (B6), không dùng link phân trang."""
     base = f"{BASE_URL}/{listing_type}-{property_type}/ho-chi-minh"
