@@ -26,7 +26,10 @@ COMMENT ON TABLE crawl.bronze_file_state IS
     '(theo dõi trạng thái TẢI file lên S3) — bảng này theo dõi trạng thái PARSE vào Silver.';
 
 
--- 2. Staging: landing zone tạm cho 1 lần chạy Spark parse job
+-- 2. Staging: landing zone tạm cho 1 lần chạy Spark parse job. Cùng cấu
+-- trúc cột (kể cả quy ước NOT NULL DEFAULT '' cho cột chuỗi) như
+-- silver.listing_history, trừ các cột chỉ sinh ra khi vào listing_history
+-- (listing_key, valid_from, valid_to, is_current, last_seen_at, ingested_at).
 CREATE UNLOGGED TABLE IF NOT EXISTS silver.listing_staging_batch (
     listing_id           BIGINT       NOT NULL,
     listing_url           TEXT         NOT NULL,
@@ -44,11 +47,12 @@ CREATE UNLOGGED TABLE IF NOT EXISTS silver.listing_staging_batch (
     price_vnd              NUMERIC(16, 0),
     price_raw               TEXT,
     price_is_negotiable      BOOLEAN      NOT NULL DEFAULT FALSE,
+    price_is_outlier            BOOLEAN      NOT NULL DEFAULT FALSE,
 
     area_m2                  NUMERIC(10, 2),
     area_raw                  TEXT,
     area_is_undetermined       BOOLEAN      NOT NULL DEFAULT FALSE,
-    area_is_outlier              BOOLEAN      NOT NULL DEFAULT FALSE,   -- MỚI, đồng bộ với silver.listing_history
+    area_is_outlier              BOOLEAN      NOT NULL DEFAULT FALSE,
 
     length_m                 NUMERIC(6, 2),
     width_m                   NUMERIC(6, 2),
@@ -56,8 +60,8 @@ CREATE UNLOGGED TABLE IF NOT EXISTS silver.listing_staging_batch (
     floors                    SMALLINT,
     bedrooms                  SMALLINT,
 
-    orientation               VARCHAR(20),
-    legal_status               VARCHAR(50),
+    orientation               VARCHAR(20)  NOT NULL DEFAULT '',
+    legal_status               VARCHAR(50)  NOT NULL DEFAULT '',
 
     has_dining_room             BOOLEAN,
     has_kitchen                 BOOLEAN,
@@ -68,13 +72,14 @@ CREATE UNLOGGED TABLE IF NOT EXISTS silver.listing_staging_batch (
     is_expired                 BOOLEAN      NOT NULL DEFAULT FALSE,
     has_warning                 BOOLEAN      NOT NULL DEFAULT FALSE,
 
-    address_street_new           VARCHAR(200),
-    address_ward_new             VARCHAR(100),
-    address_province_new          VARCHAR(100),
+    address_street_new           VARCHAR(200) NOT NULL DEFAULT '',
+    address_ward_new             VARCHAR(100) NOT NULL DEFAULT '',
+    address_province_new          VARCHAR(100) NOT NULL DEFAULT '',
 
-    address_old_raw                TEXT,
-    address_ward_old               VARCHAR(100),
-    address_district_old            VARCHAR(100),
+    address_old_raw                TEXT         NOT NULL DEFAULT '',
+    address_ward_old               VARCHAR(100) NOT NULL DEFAULT '',
+    address_district_old            VARCHAR(100) NOT NULL DEFAULT '',
+    address_province_old             VARCHAR(100) NOT NULL DEFAULT '',
 
     -- row_hash: GENERATED, gọi CÙNG hàm silver.compute_row_hash() như bên
     -- listing_history (tạo trong 003_silver_listings_history.sql)

@@ -54,11 +54,12 @@ class ParsedListing:
     price_vnd: Optional[Decimal]  # None khi price_is_negotiable=True (SỐ — vẫn NULL)
     price_raw: str
     price_is_negotiable: bool
+    price_is_outlier: bool  # True khi price_vnd/area_m2 > _MAX_PRICE_PER_M2_VND — CHỈ gắn cờ, price_vnd giữ nguyên
 
     area_m2: Optional[Decimal]  # None khi area_is_undetermined/area_is_outlier=True (SỐ — vẫn NULL)
     area_raw: str
     area_is_undetermined: bool
-    area_is_outlier: bool  # True khi area_m2 gốc > _MAX_AREA_M2 (đã bị null hóa)
+    area_is_outlier: bool  # True khi area_m2 gốc > _MAX_AREA_M2 hoặc < _MIN_AREA_M2 (đã bị null hóa)
 
     length_m: Optional[Decimal]
     width_m: Optional[Decimal]
@@ -82,11 +83,13 @@ class ParsedListing:
     address_street_new: str
     address_ward_new: str
     address_province_new: str
-    # address_old_raw giữ nguyên text thô để audit; ward_old/district_old
-    # tách qua parse_old_address() theo quy luật 4-phần-cách-dấu-phẩy.
+    # address_old_raw giữ nguyên text thô để audit; ward_old/district_old/
+    # province_old tách qua parse_old_address() theo quy luật 4-phần-cách-dấu-phẩy.
+    # province_old có thể KHÁC address_province_new (xem parse_old_address()).
     address_old_raw: str
     address_ward_old: str
     address_district_old: str
+    address_province_old: str
 
 
 @dataclass(frozen=True)
@@ -161,6 +164,18 @@ def parse_vn_number(text: Optional[str]) -> Optional[Decimal]:
 _MAX_WIDTH_LENGTH_M = Decimal("500")   # p99 thực tế: width=27, length=55
 _MAX_STREET_WIDTH_M = Decimal("200")   # p99 thực tế: 40
 _MAX_AREA_M2 = Decimal("10000")        # phạm vi đồ án không gồm đất nền (1ha)
+_MIN_AREA_M2 = Decimal("3")            # SỬA (Phase 5): p1 area thực tế toàn Silver = 21m2,
+                                        # p5 = 34m2 -> <3m2 nằm sâu ngoài phân phối tự nhiên,
+                                        # nghi field khác bị nhầm vào ô diện tích (VD thực tế:
+                                        # area_raw='01' -> area_m2=1.00, 4 dòng cùng chuỗi thô
+                                        # giống hệt nhau, không phải diện tích thật)
+
+# Ngưỡng phát hiện price_vnd/area_m2 phi lý (Phase 5, phát hiện qua
+# validate_gold_load.sql check price_per_m2_no_extreme_outlier). Benchmark
+# đối chiếu thực tế: căn hộ cao cấp HCMC ~55-85 triệu/m2 (2024), đất mặt
+# tiền đắt nhất trung tâm Q1 theo báo chí ~1-2 tỷ/m2 -> 5 tỷ/m2 rộng rãi
+# hơn hẳn mức đắt nhất thực tế ghi nhận, tránh cắt nhầm case hợp lệ.
+_MAX_PRICE_PER_M2_VND = Decimal("5000000000")
 
 
 def _sanitize_dimension(value: Optional[Decimal], max_valid: Decimal) -> Optional[Decimal]:
@@ -174,13 +189,47 @@ def _sanitize_dimension(value: Optional[Decimal], max_valid: Decimal) -> Optiona
 
 
 def _sanitize_area(area_m2: Optional[Decimal]) -> tuple[Optional[Decimal], bool]:
-    """area_m2 vượt _MAX_AREA_M2 -> null hóa + gắn area_is_outlier=True.
-    BẮT BUỘC có cờ riêng (khác 3 trường kích thước ở trên) vì area_m2 feed
-    trực tiếp vào price_per_m2_vnd (GENERATED) — cần dấu vết audit để không
-    lẫn với area_is_undetermined (site tự ghi "KXĐ", nguyên nhân khác hẳn)."""
-    if area_m2 is not None and area_m2 > _MAX_AREA_M2:
+    """area_m2 vượt _MAX_AREA_M2 HOẶC dưới _MIN_AREA_M2 -> null hóa + gắn
+    area_is_outlier=True. BẮT BUỘC có cờ riêng (khác 3 trường kích thước ở
+    trên) vì area_m2 feed trực tiếp vào price_per_m2_vnd (GENERATED) — cần
+    dấu vết audit để không lẫn với area_is_undetermined (site tự ghi "KXĐ",
+    nguyên nhân khác hẳn).
+
+    SỬA (Phase 5): bản trước chỉ chặn đầu trên. Bổ sung ngưỡng dưới sau khi
+    validate_gold_load.sql phát hiện price_per_m2_vnd bùng nổ do area_m2
+    quá nhỏ (xem comment _MIN_AREA_M2)."""
+    if area_m2 is not None and (area_m2 > _MAX_AREA_M2 or area_m2 < _MIN_AREA_M2):
         return None, True
     return area_m2, False
+
+
+def _detect_price_outlier(
+    price_vnd: Optional[Decimal], area_m2: Optional[Decimal]
+) -> bool:
+    """Phát hiện price_vnd/area_m2 vượt _MAX_PRICE_PER_M2_VND — CHỈ gắn cờ,
+    KHÔNG null hóa price_vnd (khác area_is_outlier). Quyết định có chủ đích:
+    - Null hóa price_vnd sẽ đụng CHECK constraint chk_price_negotiable_null
+      (price_vnd IS NULL chỉ khi price_is_negotiable=TRUE) — ở đây giá VẪN
+      tồn tại thật trên site, chỉ đáng ngờ độ tin cậy, khác hẳn "Thỏa thuận"
+      thật (price_value=0).
+    - Giữ nguyên price_vnd để audit/truy vết, lọc ở tầng dashboard/Gold qua
+      cờ price_is_outlier thay vì xóa dữ liệu ở Silver.
+
+    Dùng area_m2 ĐÃ sanitize (sau _sanitize_area(), gọi hàm này SAU khi có
+    area_m2 cuối cùng) — nếu area_m2 đã bị null hóa vì lý do khác (quá nhỏ/
+    quá lớn), area_is_outlier đã đủ đánh dấu vấn đề của dòng đó, không cần
+    (và không tính được) price_is_outlier nữa.
+
+    3 pattern lỗi thực tế phát hiện Phase 5 (không phân biệt trong code,
+    chỉ cần bắt đúng triệu chứng chung — giá/m2 phi lý vật lý):
+    1. price_raw dạng "X tỷ / m²" nhưng price_vnd = X(tỷ) × area_m2 (lỗi
+       phía nguồn — site tự nhân giá/m2 nhập nhầm thành tổng giá).
+    2. area_m2 quá nhỏ (đã xử lý riêng ở _sanitize_area, không lặp ở đây).
+    3. price_vnd gấp ~100 lần giá thật ghi trong tiêu đề (nghi site xử lý
+       sai dấu phẩy thập phân kiểu Việt Nam, VD "6,9 tỷ" -> đọc nhầm)."""
+    if price_vnd is None or area_m2 is None or area_m2 == 0:
+        return False
+    return (price_vnd / area_m2) > _MAX_PRICE_PER_M2_VND
 
 
 def extract_listing_id_from_url(url: str) -> Optional[int]:
@@ -190,6 +239,31 @@ def extract_listing_id_from_url(url: str) -> Optional[int]:
     if not match:
         return None
     return int(match.group(1))
+
+
+_DATASET_BRONZE_PREFIX = "bronze/dataset/"
+_WEB_BRONZE_PREFIX = "bronze/web/"
+
+
+def infer_source_from_bronze_key(source_bronze_key: str) -> str:
+    """Suy 'source' ('dataset'|'web') từ prefix của source_bronze_key.
+
+    Đặt ở core (không phải cột riêng trong Silver) vì suy được 100% từ
+    source_bronze_key — thêm cột sẽ là dữ liệu derived/redundant, vi phạm
+    ranh giới Medallion (Silver = clean raw grain).
+
+    1 nguồn sự thật duy nhất, dùng chung cho:
+    - control-plane: crawl.bronze_file_state.source (bronze_file_state_io.py)
+    - Gold ETL: gold.dim_source.source_name (silver_to_gold_io.py)
+    Tránh lặp lại logic ở 2 nơi rồi lệch nhau, cùng pattern với
+    silver.compute_row_hash()/gold.compute_feature_key() (1 nguồn sự thật)."""
+    if source_bronze_key.startswith(_DATASET_BRONZE_PREFIX):
+        return "dataset"
+    if source_bronze_key.startswith(_WEB_BRONZE_PREFIX):
+        return "web"
+    raise ValueError(
+        f"Không suy được source (dataset/web) từ source_bronze_key: {source_bronze_key!r}"
+    )
 
 
 def _parse_check_icon(cell: Tag) -> Optional[bool]:
@@ -233,22 +307,29 @@ def _parse_moreinfor_table(section: Tag) -> dict[str, Tag]:
     return result
 
 
-def parse_old_address(raw: str) -> tuple[str, str]:
-    """Tách (ward_old, district_old) từ address_old_raw dạng
+def parse_old_address(raw: str) -> tuple[str, str, str]:
+    """Tách (ward_old, district_old, province_old) từ address_old_raw dạng
     'Đường X, Phường/Xã/Thị Trấn Y, Quận/Huyện/Thành phố Z, Tỉnh/Thành (cũ)'.
-    Lấy 3 phần cuối theo dấu ',' từ phải, bỏ tỉnh/thành (không lưu vì cấp tỉnh không đổi).
-    Giữ nguyên tiền tố (Phường/Xã/Quận/Huyện...) trong giá trị trả về.
+    Lấy 3 phần cuối theo dấu ',' từ phải. Giữ nguyên tiền tố
+    (Phường/Xã/Quận/Huyện...) trong giá trị trả về.
 
-    Trả về ("", "") khi raw rỗng hoặc không đủ 3 phần — theo quy ước dự án
-    dùng "" cho trường kiểu chuỗi thiếu dữ liệu (xem module docstring)."""
+    SỬA (phát hiện Phase 5): bản trước bỏ qua phần tỉnh/thành với giả định
+    "cấp tỉnh không đổi" — SAI. Thực tế có tin đăng tỉnh/thành ở địa chỉ CŨ
+    khác địa chỉ MỚI (VD: Xã Long Điền — cũ thuộc 'Bà Rịa Vũng Tàu', mới
+    thuộc 'Hồ Chí Minh', do sáp nhập địa giới hành chính). PHẢI lưu riêng
+    province_old, không được coi là trùng address_province_new.
+
+    Trả về ("", "", "") khi raw rỗng hoặc không đủ 3 phần — theo quy ước
+    dự án dùng "" cho trường kiểu chuỗi thiếu dữ liệu (xem module docstring)."""
     if not raw:
-        return "", ""
+        return "", "", ""
     parts = [p.strip() for p in raw.split(",")]
     if len(parts) < 3:
-        return "", ""
+        return "", "", ""
     ward_old = parts[-3]
     district_old = parts[-2]
-    return ward_old, district_old
+    province_old = parts[-1]
+    return ward_old, district_old, province_old
 
 
 IN_SCOPE_PROVINCE = "Hồ Chí Minh"
@@ -263,7 +344,14 @@ IN_SCOPE_PROPERTY_TYPES = {
 
 def is_in_scope(listing: ParsedListing) -> bool:
     """Kiểm tra tin đăng có thuộc phạm vi đồ án không. Ngoài phạm vi — bị bỏ qua lặng lẽ
-    ở parse_partition(), không ghi vào staging lẫn quarantine."""
+    ở parse_partition(), không ghi vào staging lẫn quarantine.
+
+    QUAN TRỌNG: lọc theo address_province_new (địa chỉ HIỆN TẠI, structured
+    field itemprop="addressRegion"), TUYỆT ĐỐI KHÔNG dùng address_province_old.
+    address_province_old là tỉnh/thành TRƯỚC sáp nhập địa giới hành chính,
+    có thể khác address_province_new (VD: Xã Long Điền — cũ thuộc 'Bà Rịa
+    Vũng Tàu', mới thuộc 'Hồ Chí Minh') — lọc nhầm theo province_old sẽ
+    loại bỏ sai các tin đăng thực sự thuộc TP.HCM hiện tại."""
     return (
         listing.address_province_new == IN_SCOPE_PROVINCE
         and listing.listing_type in IN_SCOPE_LISTING_TYPES
@@ -339,8 +427,13 @@ def parse_listing_html(
     if not area_is_undetermined and area_m2 is None:
         return _fail(f"area_m2 khong parse duoc: {area_raw!r}")
     # Null hóa + gắn cờ nếu area_m2 vượt ngưỡng hợp lý (đất >10.000m2 không
-    # thuộc phạm vi đồ án, gần như chắc chắn lỗi parse thập phân/nhập liệu).
+    # thuộc phạm vi đồ án, hoặc <3m2 nghi field khác bị nhầm vào ô diện tích
+    # — gần như chắc chắn lỗi parse thập phân/nhập liệu).
     area_m2, area_is_outlier = _sanitize_area(area_m2)
+
+    # Phát hiện giá/m2 phi lý (Phase 5) — PHẢI tính SAU khi area_m2 đã
+    # sanitize ở trên (dùng area_m2 cuối cùng, không dùng giá trị thô).
+    price_is_outlier = _detect_price_outlier(price_vnd, area_m2)
 
     # is_expired / has_warning: KHÔNG cố định vị trí trong article -> tìm
     # toàn bộ subtree thay vì chỉ children trực tiếp.
@@ -361,7 +454,7 @@ def parse_listing_html(
 
     old_address_tag = article.find("p", class_="old-address")
     address_old_raw = _get_text(old_address_tag)
-    address_ward_old, address_district_old = parse_old_address(address_old_raw)
+    address_ward_old, address_district_old, address_province_old = parse_old_address(address_old_raw)
 
     moreinfor_section = article.find("section", class_="moreinfor1")
     if moreinfor_section is None:
@@ -410,6 +503,7 @@ def parse_listing_html(
         price_vnd=price_vnd,
         price_raw=price_raw,
         price_is_negotiable=price_is_negotiable,
+        price_is_outlier=price_is_outlier,
         area_m2=area_m2,
         area_raw=area_raw,
         area_is_undetermined=area_is_undetermined,
@@ -434,4 +528,5 @@ def parse_listing_html(
         address_old_raw=address_old_raw,
         address_ward_old=address_ward_old,
         address_district_old=address_district_old,
+        address_province_old=address_province_old,
     )

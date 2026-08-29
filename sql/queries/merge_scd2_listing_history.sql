@@ -1,21 +1,18 @@
 -- ============================================================================
 -- sql/queries/merge_scd2_listing_history.sql
 -- Merge SCD Type 2: silver.listing_staging_batch -> silver.listing_history.
--- Chạy sau mỗi lần Spark ETL (Phase 2) ghi xong 1 batch vào staging_batch.
+-- Chạy sau mỗi lần Spark ETL (Bronze->Silver) ghi xong 1 batch vào staging_batch.
 --
 -- Thiết kế: 3 bước UPDATE/INSERT tuần tự, KHÔNG gộp vào 1 câu MERGE (Postgres
--- MERGE không xử lý tốt kiểu "đóng dòng cũ + mở dòng mới" cùng lúc) — tách rõ
--- để dễ debug, đúng tinh thần "không over-engineer" đã chốt.
+-- MERGE không xử lý tốt kiểu "đóng dòng cũ + mở dòng mới" cùng lúc).
 --
 -- QUAN TRỌNG: kết quả LAG/LEAD được vật chất hóa 1 LẦN DUY NHẤT vào bảng tạm
 -- (scd2_ordered/scd2_change_points/scd2_same_hash) TRƯỚC khi chạy 3 bước.
 -- Nếu để mỗi bước tự tính lại CTE riêng, Bước 1 sẽ đổi is_current trên
 -- listing_history TRƯỚC khi Bước 2/3 chạy -> CTE tính lại ở bước sau sẽ đọc
--- nhầm dữ liệu đã bị Bước 1 sửa (anchor "is_current" đã tắt, dòng mới ở
--- Bước 2 lại chưa insert) -> sai kết quả. Bảng tạm tránh được lỗi này.
+-- nhầm dữ liệu đã bị Bước 1 sửa. Bảng tạm tránh được lỗi này.
 --
--- Toàn bộ script chạy trong 1 transaction để đảm bảo tính nguyên tử (nếu
--- Bước 2/3 lỗi, Bước 1 cũng không được commit).
+-- Toàn bộ script chạy trong 1 transaction để đảm bảo tính nguyên tử.
 -- ============================================================================
 
 BEGIN;
@@ -27,49 +24,43 @@ DROP TABLE IF EXISTS scd2_ordered;
 
 CREATE TEMP TABLE scd2_ordered AS
 WITH combined AS (
-    -- Toàn bộ quan sát MỚI trong batch (nguồn: Spark ETL Phase 2)
+    -- Toàn bộ quan sát MỚI trong batch (nguồn: Spark ETL Bronze->Silver)
     SELECT
         listing_id, listing_url, source_part, source_bronze_key, crawl_date,
         row_hash, 'staging'::TEXT AS origin,
         title, listing_type, property_type, posted_date,
-        price_vnd, price_raw, price_is_negotiable,
-        area_m2, area_raw, area_is_undetermined,
+        price_vnd, price_raw, price_is_negotiable, price_is_outlier,
+        area_m2, area_raw, area_is_undetermined, area_is_outlier,
         length_m, width_m, street_width_m, floors, bedrooms,
         orientation, legal_status,
         has_dining_room, has_kitchen, has_rooftop, has_car_parking, owner_direct,
         is_expired, has_warning,
         address_street_new, address_ward_new, address_province_new,
-        address_old_raw, address_ward_old, address_district_old
+        address_old_raw, address_ward_old, address_district_old, address_province_old
     FROM silver.listing_staging_batch
 
     UNION ALL
 
     -- TOÀN BỘ version đã có trong Silver (KHÔNG chỉ is_current), dùng làm
-    -- "mốc" (anchor) để LAG() biết prev_hash cho từng dòng staging.
-    -- QUAN TRỌNG (fix bug rerun không idempotent): nếu chỉ lấy is_current,
-    -- lần chạy thứ 2 trở đi sẽ KHÔNG biết các version lịch sử (không phải
-    -- current) đã từng tồn tại -> quan sát staging trùng với 1 version cũ
+    -- "mốc" (anchor) để LAG() biết prev_hash cho từng dòng staging. Lấy
+    -- toàn bộ lịch sử (không filter is_current) để rerun luôn idempotent —
+    -- nếu chỉ lấy is_current, quan sát staging trùng với 1 version CŨ
     -- (không phải current) sẽ bị LAG() hiểu nhầm là "lần đầu xuất hiện"
-    -- (prev_hash=NULL) -> tạo NHẦM 1 bản sao trùng của version đó mỗi lần
-    -- rerun. Lấy toàn bộ lịch sử đảm bảo LAG() luôn so sánh đúng với TOÀN
-    -- BỘ chuỗi giá trị đã từng ghi nhận, không chỉ mỗi bản hiện tại.
-    -- KHÔNG phải kết quả cuối cùng -> sẽ bị loại khỏi change_points/
-    -- same_hash_rows bằng điều kiện origin='staging' ở bảng tạm sau.
+    -- và tạo nhầm 1 bản sao mỗi lần rerun.
     SELECT
         listing_id, listing_url, source_part, source_bronze_key,
         valid_from AS crawl_date,
         row_hash, 'anchor'::TEXT AS origin,
         title, listing_type, property_type, posted_date,
-        price_vnd, price_raw, price_is_negotiable,
-        area_m2, area_raw, area_is_undetermined,
+        price_vnd, price_raw, price_is_negotiable, price_is_outlier,
+        area_m2, area_raw, area_is_undetermined, area_is_outlier,
         length_m, width_m, street_width_m, floors, bedrooms,
         orientation, legal_status,
         has_dining_room, has_kitchen, has_rooftop, has_car_parking, owner_direct,
         is_expired, has_warning,
         address_street_new, address_ward_new, address_province_new,
-        address_old_raw, address_ward_old, address_district_old
+        address_old_raw, address_ward_old, address_district_old, address_province_old
     FROM silver.listing_history
-    -- Không filter is_current: xem ghi chú fix idempotent ở trên.
 )
 SELECT
     combined.*,
@@ -135,14 +126,14 @@ INSERT INTO silver.listing_history (
     listing_id, listing_url, source_part, source_bronze_key, crawl_date,
     valid_from, valid_to, is_current, last_seen_at,
     title, listing_type, property_type, posted_date,
-    price_vnd, price_raw, price_is_negotiable,
-    area_m2, area_raw, area_is_undetermined,
+    price_vnd, price_raw, price_is_negotiable, price_is_outlier,
+    area_m2, area_raw, area_is_undetermined, area_is_outlier,
     length_m, width_m, street_width_m, floors, bedrooms,
     orientation, legal_status,
     has_dining_room, has_kitchen, has_rooftop, has_car_parking, owner_direct,
     is_expired, has_warning,
     address_street_new, address_ward_new, address_province_new,
-    address_old_raw, address_ward_old, address_district_old
+    address_old_raw, address_ward_old, address_district_old, address_province_old
 )
 SELECT
     listing_id, listing_url, source_part, source_bronze_key, crawl_date,
@@ -151,20 +142,21 @@ SELECT
     is_latest AS is_current,
     crawl_date AS last_seen_at,
     title, listing_type, property_type, posted_date,
-    price_vnd, price_raw, price_is_negotiable,
-    area_m2, area_raw, area_is_undetermined,
+    price_vnd, price_raw, price_is_negotiable, price_is_outlier,
+    area_m2, area_raw, area_is_undetermined, area_is_outlier,
     length_m, width_m, street_width_m, floors, bedrooms,
     orientation, legal_status,
     has_dining_room, has_kitchen, has_rooftop, has_car_parking, owner_direct,
     is_expired, has_warning,
     address_street_new, address_ward_new, address_province_new,
-    address_old_raw, address_ward_old, address_district_old
+    address_old_raw, address_ward_old, address_district_old, address_province_old
 FROM scd2_change_points;
 
 -- ----------------------------------------------------------------------
 -- Bước 3: cập nhật last_seen_at cho các listing_id KHÔNG đổi hash trong
 -- batch (đúng nguyên tắc "duplicate trong Silver = bug" -> không insert
--- version mới, chỉ xác nhận lần crawl gần nhất).
+-- version mới, chỉ xác nhận lần crawl gần nhất). Đây cũng là bằng chứng
+-- duy nhất khiến is_reconfirmed=TRUE ở Gold (last_seen_at > valid_from).
 -- ----------------------------------------------------------------------
 UPDATE silver.listing_history h
 SET last_seen_at = s.max_crawl_date

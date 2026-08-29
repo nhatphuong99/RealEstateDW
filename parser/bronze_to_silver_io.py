@@ -85,7 +85,8 @@ UNIFIED_PARSE_SCHEMA = StructType(
         StructField("price_vnd", DecimalType(16, 0), nullable=True),
         StructField("price_raw", StringType(), nullable=True),
         StructField("price_is_negotiable", BooleanType(), nullable=True),
-        StructField("area_m2", DecimalType(8, 2), nullable=True),
+        StructField("price_is_outlier", BooleanType(), nullable=True),   # MỚI (Phase 5)
+        StructField("area_m2", DecimalType(10, 2), nullable=True),
         StructField("area_raw", StringType(), nullable=True),
         StructField("area_is_undetermined", BooleanType(), nullable=True),
         StructField("area_is_outlier", BooleanType(), nullable=True),   # MỚI
@@ -109,6 +110,7 @@ UNIFIED_PARSE_SCHEMA = StructType(
         StructField("address_old_raw", StringType(), nullable=True),
         StructField("address_ward_old", StringType(), nullable=True),
         StructField("address_district_old", StringType(), nullable=True),
+        StructField("address_province_old", StringType(), nullable=True),
         # --- 2 cột chỉ có giá trị ở nhánh quarantine ---
         StructField("error_reason", StringType(), nullable=True),
         StructField("raw_html", BinaryType(), nullable=True),
@@ -139,10 +141,11 @@ def _to_output_row(result) -> Row:
             _decimal_or_none(result.price_vnd),
             result.price_raw,
             result.price_is_negotiable,
+            result.price_is_outlier,   # MỚI (Phase 5)
             _decimal_or_none(result.area_m2),
             result.area_raw,
             result.area_is_undetermined,
-            result.area_is_outlier,   
+            result.area_is_outlier,   # MỚI
             _decimal_or_none(result.length_m),
             _decimal_or_none(result.width_m),
             _decimal_or_none(result.street_width_m),
@@ -163,12 +166,13 @@ def _to_output_row(result) -> Row:
             result.address_old_raw,
             result.address_ward_old,
             result.address_district_old,
+            result.address_province_old,
             None,  # error_reason
             None,  # raw_html
         )
 
     if isinstance(result, ParseError):
-        # 28 cột giữa crawl_date và error_reason (title..address_district_old)
+        # 30 cột giữa crawl_date và error_reason (title..address_province_old)
         # đều None — chỉ success mới có giá trị.
         return Row(
             None,  # listing_id
@@ -176,7 +180,7 @@ def _to_output_row(result) -> Row:
             None,  # source_part
             result.source_bronze_key,
             result.crawl_date,
-            *([None] * 31),  # title..address_district_old
+            *([None] * 32),  # title..address_province_old
             result.error_reason,
             result.raw_html,
         )
@@ -253,16 +257,19 @@ def read_bronze_parquet(spark: SparkSession, local_path: str, s3_key: str) -> Da
 
 # Cột silver.listing_staging_batch theo UNIFIED_PARSE_SCHEMA,
 # trừ error_reason/raw_html (chỉ quarantine) và row_hash (Postgres tự tính).
+# Cột silver.listing_staging_batch theo UNIFIED_PARSE_SCHEMA,
+# trừ error_reason/raw_html (chỉ quarantine) và row_hash (Postgres tự tính).
 _STAGING_COLUMNS = [
     "listing_id", "listing_url", "source_part", "source_bronze_key",
     "crawl_date", "title", "listing_type", "property_type", "posted_date",
-    "price_vnd", "price_raw", "price_is_negotiable", "area_m2", "area_raw",
-    "area_is_undetermined", "area_is_outlier", "length_m", "width_m", "street_width_m",
-    "floors", "bedrooms", "orientation", "legal_status", "has_dining_room",
-    "has_kitchen", "has_rooftop", "has_car_parking", "owner_direct",
-    "is_expired", "has_warning", "address_street_new", "address_ward_new",
+    "price_vnd", "price_raw", "price_is_negotiable", "price_is_outlier",
+    "area_m2", "area_raw", "area_is_undetermined", "area_is_outlier",
+    "length_m", "width_m", "street_width_m", "floors", "bedrooms",
+    "orientation", "legal_status", "has_dining_room", "has_kitchen",
+    "has_rooftop", "has_car_parking", "owner_direct", "is_expired",
+    "has_warning", "address_street_new", "address_ward_new",
     "address_province_new", "address_old_raw", "address_ward_old",
-    "address_district_old",
+    "address_district_old", "address_province_old",
 ]
 
 
