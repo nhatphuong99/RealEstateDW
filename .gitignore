@@ -182,3 +182,8 @@ tests/
 parse_to_staging.py
 smoke_test*.py
 
+### Other
+scripts/
+79_ho_chi_minh/
+
+

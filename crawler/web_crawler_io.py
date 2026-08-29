@@ -146,14 +146,14 @@ class PsycopgControlPlaneRepo:
             )
 
     def reclaim_stale_detail_queue(self) -> int:
-        """Reset các dòng `in_progress` còn treo từ run trước (crash) về
+        """Reset các dòng `processing` còn treo từ run trước (crash) về
         `pending`, giữ nguyên `discovered_at`."""
         with self._cursor() as cur:
             cur.execute(
                 """
                 UPDATE crawl.detail_queue
                 SET status = 'pending', claimed_at = NULL
-                WHERE status = 'in_progress'
+                WHERE status = 'processing'
                 RETURNING id
                 """
             )
@@ -228,7 +228,7 @@ class PsycopgControlPlaneRepo:
             cur.execute(
                 """
                 UPDATE crawl.detail_queue
-                SET status = 'in_progress', claimed_at = now()
+                SET status = 'processing', claimed_at = now()
                 WHERE id = (
                     SELECT id FROM crawl.detail_queue
                     WHERE status = 'pending'

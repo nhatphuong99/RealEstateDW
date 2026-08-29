@@ -1,4 +1,9 @@
-"""dags/silver_to_gold.py — DAG 4: ETL Silver -> Gold."""
+"""dags/silver_to_gold.py — DAG 4: ETL Silver -> Gold.
+
+Bước CUỐI trong chuỗi tự động hourly: DAG 2 (web_crawler, @hourly) ->
+DAG 3 (bronze_to_silver) -> DAG 4 (silver_to_gold, file này). `schedule=None`
+GIỮ NGUYÊN — DAG này không tự chạy theo lịch riêng, luôn được DAG 3 trigger.
+"""
 from __future__ import annotations
 
 from datetime import timedelta
@@ -17,8 +22,8 @@ default_args = {
 
 with DAG(
     dag_id="silver_to_gold",
-    description="DAG 4 - ETL Silver -> Gold (5 Dim + Fact Transaction/Observation-grain, "
-                 "full-refresh idempotent qua 1 transaction SQL)",
+    description="DAG 4 - ETL Silver -> Gold (bước cuối chuỗi tự động DAG2->3->4), "
+                 "full-refresh idempotent qua 1 transaction SQL",
     schedule=None,  # chạy tay trước, đặt lịch thật sau khi tin tưởng pipeline (giống DAG 3)
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Ho_Chi_Minh"),
     catchup=False,

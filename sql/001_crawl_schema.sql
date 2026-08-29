@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS crawl.listing_progress (
 CREATE TABLE IF NOT EXISTS crawl.detail_queue (
     id                  SERIAL PRIMARY KEY,
     url                 TEXT UNIQUE NOT NULL,
-    status              TEXT NOT NULL DEFAULT 'pending', -- pending/in_progress/done/failed
+    status              TEXT NOT NULL DEFAULT 'pending', -- pending/processing/done/failed
     discovered_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     claimed_at          TIMESTAMPTZ,
     discovered_page_id  INT REFERENCES crawl.listing_progress(id),
