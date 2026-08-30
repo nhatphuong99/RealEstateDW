@@ -63,7 +63,7 @@ WEB_CRAWLER_MAX_DETAIL_PAGES_PER_RUN = _int("WEB_CRAWLER_MAX_DETAIL_PAGES_PER_RU
 # [TIMING] thực tế của run_etl_bronze_to_silver()/run_etl_silver_to_gold()
 # sau vài chu kỳ đầu để tinh chỉnh lại nếu cần (VD backlog nhiều file Bronze
 # dồn lại sau downtime sẽ khiến DAG 3 chạy lâu hơn ước tính này).
-WEB_CRAWLER_TIME_BOX_SECONDS = _int("WEB_CRAWLER_TIME_BOX_SECONDS", 40 * 60)
+WEB_CRAWLER_TIME_BOX_SECONDS = _int("WEB_CRAWLER_TIME_BOX_SECONDS", 45 * 60)
 WEB_CRAWLER_DELAY_MIN_SECONDS = _float("WEB_CRAWLER_DELAY_MIN_SECONDS", 5.0)
 WEB_CRAWLER_DELAY_MAX_SECONDS = _float("WEB_CRAWLER_DELAY_MAX_SECONDS", 10.0)
 WEB_CRAWLER_MAX_FETCH_ERROR_RETRIES = _int("WEB_CRAWLER_MAX_FETCH_ERROR_RETRIES", 3)
