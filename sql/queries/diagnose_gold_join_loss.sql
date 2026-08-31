@@ -1,14 +1,12 @@
 -- ============================================================================
 -- sql/queries/diagnose_gold_join_loss.sql
 -- CÔNG CỤ CHẨN ĐOÁN — chạy khi validate_gold_load báo row_count_match lệch
--- (đặc biệt actual=0) mà chưa rõ nguyên nhân. Đếm riêng số dòng
--- silver.listing_history KHÔNG khớp được với TỪNG dimension trong
--- etl_silver_to_gold.sql bước 6, để biết chính xác JOIN nào đang làm rớt
--- dòng thay vì phải đoán.
+-- (đặc biệt actual=0). Đếm riêng số dòng silver.listing_history không khớp
+-- được với từng dimension ở etl_silver_to_gold.sql bước 6, để biết chính
+-- xác JOIN nào đang làm rớt dòng thay vì phải đoán.
 --
--- CÁCH DÙNG: chạy SAU khi etl_silver_to_gold.sql đã chạy xong (bước 1-5 đã
--- nạp Dim), TRƯỚC hoặc SAU bước 6 đều được (không phụ thuộc Fact đã có gì).
--- Đọc từng dòng kết quả: "orphan_count" > 0 ở dim nào -> đó là nơi cần sửa.
+-- CÁCH DÙNG: chạy sau khi etl_silver_to_gold.sql chạy xong (bước 1-5 đã nạp
+-- Dim). Đọc "orphan_count" > 0 ở dim nào -> đó là nơi cần sửa.
 -- ============================================================================
 
 -- 1. Có bao nhiêu dòng Silver không khớp được gold.dim_location?
@@ -65,11 +63,9 @@ WHERE src.source_key IS NULL
 
 UNION ALL
 
--- 4. Tổng dòng khớp được CẢ BA dimension cùng lúc — đây mới là số dòng
---    thật sự sẽ được INSERT vào Fact. Nếu = 0 dù (1)+(2)+(3) đều = 0 (tức
---    từng dim riêng lẻ đều khớp), khả năng cao vấn đề nằm ở phần code
---    Python (silver_to_gold_io.py không thực sự execute file SQL đang xem,
---    hoặc kết nối sai DSN/schema search_path) — không phải lỗi logic SQL.
+-- 4. Tổng dòng khớp được cả 3 dimension — số dòng thật sự sẽ INSERT vào
+--    Fact. Nếu = 0 dù (1)+(2)+(3) đều = 0, khả năng cao lỗi ở code Python
+--    (không execute đúng file SQL, hoặc sai DSN/schema search_path).
 SELECT
     'joined_all_3_dims' AS join_target,
     COUNT(*) AS orphan_count,
@@ -93,16 +89,13 @@ JOIN gold.dim_source src
    AND src.source_part = h.source_part;
 
 -- ----------------------------------------------------------------------
--- Nếu (1)/(2)/(3) đều = 0 nhưng gold.fact_listing_price VẪN 0 dòng sau khi
--- chạy etl_silver_to_gold.sql: kiểm tra thêm 2 khả năng phổ biến nhất
--- (không phải lỗi logic JOIN, mà lỗi vận hành/schema-drift):
+-- Nếu (1)/(2)/(3) đều = 0 nhưng fact_listing_price vẫn 0 dòng: kiểm tra 2
+-- khả năng phổ biến (lỗi vận hành/schema-drift, không phải lỗi JOIN):
 --
--- a) Chạy 2 câu dưới đây để xác nhận gold.dim_location/gold.fact_listing_price
---    THỰC SỰ có đúng các cột mới (province_new, price_is_outlier,
---    observed_date_key) -- nếu lệch, nghĩa là DB đang chạy 1 phiên bản
---    005_gold_schema.sql CŨ (province/price_valid_from_date_key), phải
---    DROP SCHEMA gold CASCADE rồi chạy lại 005_gold_schema.sql MỚI trước
---    khi chạy lại etl_silver_to_gold.sql:
+-- a) Xác nhận gold.dim_location/fact_listing_price có đúng cột mới
+--    (province_new, price_is_outlier, observed_date_key) — nếu lệch, DB
+--    đang chạy bản 005_gold_schema.sql cũ, phải DROP SCHEMA gold CASCADE
+--    rồi chạy lại bản mới:
 --
 --       SELECT column_name FROM information_schema.columns
 --       WHERE table_schema='gold' AND table_name='dim_location' ORDER BY column_name;
@@ -110,7 +103,6 @@ JOIN gold.dim_source src
 --       SELECT column_name FROM information_schema.columns
 --       WHERE table_schema='gold' AND table_name='fact_listing_price' ORDER BY column_name;
 --
--- b) Xác nhận parser/silver_to_gold_io.py đang đọc ĐÚNG file đang xem (kiểm
---    tra _ETL_SQL_PATH trỏ đúng sql/queries/etl_silver_to_gold.sql, không
---    phải bản cache/copy cũ ở đường dẫn khác trong image Airflow).
+-- b) Xác nhận parser/silver_to_gold_io.py đọc đúng file (_ETL_SQL_PATH trỏ
+--    đúng sql/queries/etl_silver_to_gold.sql, không phải bản cache cũ).
 -- ----------------------------------------------------------------------

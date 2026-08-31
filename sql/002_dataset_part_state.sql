@@ -5,10 +5,10 @@
 -- Idempotent: IF NOT EXISTS + ON CONFLICT DO NOTHING.
 -- =============================================================================
 
-CREATE SCHEMA IF NOT EXISTS crawl;
+CREATE SCHEMA IF NOT EXISTS pipeline;
 
 -- Trạng thái tải từng part (dùng cho A1–A4)
-CREATE TABLE IF NOT EXISTS crawl.dataset_part_state (
+CREATE TABLE IF NOT EXISTS pipeline.dataset_part_state (
     part_number   INT PRIMARY KEY,               -- 1..77
     status        TEXT NOT NULL DEFAULT 'pending', -- pending/done/failed
     s3_key        TEXT,                          -- set khi status='done'
@@ -19,11 +19,11 @@ CREATE TABLE IF NOT EXISTS crawl.dataset_part_state (
 );
 
 -- Seed 77 dòng (1..77), idempotent
-INSERT INTO crawl.dataset_part_state (part_number)
+INSERT INTO pipeline.dataset_part_state (part_number)
 SELECT generate_series(1, 77)
 ON CONFLICT (part_number) DO NOTHING;
 
 -- Index cho part chưa xong (pending/failed)
 CREATE INDEX IF NOT EXISTS idx_dataset_part_state_pending
-    ON crawl.dataset_part_state (part_number)
+    ON pipeline.dataset_part_state (part_number)
     WHERE status IN ('pending', 'failed');

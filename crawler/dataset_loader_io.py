@@ -143,7 +143,7 @@ class S3PartUploader:
 
 
 def list_existing_s3_keys(bucket: str, prefix: str, s3_client=None) -> set[str]:
-    """Liệt kê tất cả key thực trên S3 dưới `prefix` để đối chiếu với crawl.dataset_part_state."""
+    """Liệt kê tất cả key thực trên S3 dưới `prefix` để đối chiếu với pipeline.dataset_part_state."""
     s3 = s3_client or boto3.client("s3")
     paginator = s3.get_paginator("list_objects_v2")
     keys: set[str] = set()
@@ -158,7 +158,7 @@ def list_existing_s3_keys(bucket: str, prefix: str, s3_client=None) -> set[str]:
 # ============================================================
 
 class PsycopgPartStateStore:
-    """Thao tác bảng crawl.dataset_part_state (DDL: sql/002_dataset_part_state.sql).
+    """Thao tác bảng pipeline.dataset_part_state (DDL: sql/002_dataset_part_state.sql).
     `autocommit=True` — mỗi method là 1 statement độc lập, giống PsycopgControlPlaneRepo Nhóm B."""
 
     def __init__(self, dsn: str) -> None:
@@ -179,7 +179,7 @@ class PsycopgPartStateStore:
             cur.execute(
                 """
                 SELECT part_number, status, s3_key, probed_at, downloaded_at, last_error
-                FROM crawl.dataset_part_state
+                FROM pipeline.dataset_part_state
                 ORDER BY part_number
                 """
             )
@@ -190,7 +190,7 @@ class PsycopgPartStateStore:
         with self._conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE crawl.dataset_part_state
+                UPDATE pipeline.dataset_part_state
                 SET status = 'done', s3_key = %s, probed_at = now(),
                     downloaded_at = now(), last_error = NULL, updated_at = now()
                 WHERE part_number = %s
@@ -202,7 +202,7 @@ class PsycopgPartStateStore:
         with self._conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE crawl.dataset_part_state
+                UPDATE pipeline.dataset_part_state
                 SET status = 'failed', probed_at = now(), last_error = %s, updated_at = now()
                 WHERE part_number = %s
                 """,
@@ -251,7 +251,7 @@ def compute_parts_to_process_task() -> list[int]:
 
 def process_one_part_task(part_number: int) -> None:
     """Điểm gọi cho Task 2 (mapped, 1 Task Instance / part). Lỗi ở bất kỳ
-    bước nào -> ghi crawl.dataset_part_state rồi `raise` ngay để Airflow
+    bước nào -> ghi pipeline.dataset_part_state rồi `raise` ngay để Airflow
     tự retry đúng Task Instance này."""
     outcome: PartOutcome = process_one_part(
         part_number,

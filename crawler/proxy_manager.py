@@ -187,13 +187,10 @@ def fetch_fresh_proxies(
 
 class ProxyPool:
     """Quản lý pool proxy trong bộ nhớ (không lưu DB — proxy free chết nhanh).
+    Implement Protocol ProxyPool (current/rotate/mark_failed), cắm thẳng vào WebCrawlerCore.
 
-    Implement đúng Protocol ProxyPool (current/rotate/mark_failed) trong web_crawler_core.py,
-    cắm thẳng vào WebCrawlerCore thay cho SimpleProxyPool.
-
-    `refill()` là method riêng, orchestrator (DAG) tự gọi khi cần bổ sung proxy mới
-    (đầu mỗi run hoặc khi pool cạn). Đây là network call tốn thời gian (health-check song song),
-    không nên gọi trong vòng lặp fetch chính."""
+    `refill()` là method riêng, orchestrator (DAG) tự gọi khi cần bổ sung proxy
+    (đầu run hoặc khi cạn) — network call tốn thời gian, không gọi trong vòng lặp fetch chính."""
 
 
     def __init__(self, proxies: Optional[list[str]] = None) -> None:

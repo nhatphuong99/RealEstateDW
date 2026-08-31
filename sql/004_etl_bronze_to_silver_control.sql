@@ -6,7 +6,7 @@
 -- ============================================================================
 
 -- 1. Control-plane: trạng thái parse file Bronze
-CREATE TABLE IF NOT EXISTS crawl.bronze_file_state (
+CREATE TABLE IF NOT EXISTS pipeline.bronze_file_state (
     s3_key            TEXT PRIMARY KEY,
     source            TEXT NOT NULL,                    -- 'dataset' | 'web'
     status            TEXT NOT NULL DEFAULT 'pending',   -- pending/processing/done/failed
@@ -18,17 +18,16 @@ CREATE TABLE IF NOT EXISTS crawl.bronze_file_state (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bronze_file_state_pending
-    ON crawl.bronze_file_state (discovered_at)
+    ON pipeline.bronze_file_state (discovered_at)
     WHERE status = 'pending';
 
-COMMENT ON TABLE crawl.bronze_file_state IS
-    'Control-plane cho DAG 3 (bronze_to_silver). Khác với crawl.dataset_part_state '
+COMMENT ON TABLE pipeline.bronze_file_state IS
+    'Control-plane cho DAG 3 (bronze_to_silver). Khác với pipeline.dataset_part_state '
     '(theo dõi trạng thái TẢI file lên S3) — bảng này theo dõi trạng thái PARSE vào Silver.';
 
 
--- 2. Staging: landing zone tạm cho 1 lần chạy Spark parse job. Cùng cấu
--- trúc cột (kể cả quy ước NOT NULL DEFAULT '' cho cột chuỗi) như
--- silver.listing_history, trừ các cột chỉ sinh ra khi vào listing_history
+-- 2. Staging: landing zone tạm cho 1 lần chạy Spark parse job. Cùng cấu trúc
+-- cột như silver.listing_history, trừ các cột chỉ sinh khi vào listing_history
 -- (listing_key, valid_from, valid_to, is_current, last_seen_at, ingested_at).
 CREATE UNLOGGED TABLE IF NOT EXISTS silver.listing_staging_batch (
     listing_id           BIGINT       NOT NULL,

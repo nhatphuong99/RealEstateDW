@@ -41,12 +41,10 @@ WITH combined AS (
 
     UNION ALL
 
-    -- TOÀN BỘ version đã có trong Silver (KHÔNG chỉ is_current), dùng làm
-    -- "mốc" (anchor) để LAG() biết prev_hash cho từng dòng staging. Lấy
-    -- toàn bộ lịch sử (không filter is_current) để rerun luôn idempotent —
-    -- nếu chỉ lấy is_current, quan sát staging trùng với 1 version CŨ
-    -- (không phải current) sẽ bị LAG() hiểu nhầm là "lần đầu xuất hiện"
-    -- và tạo nhầm 1 bản sao mỗi lần rerun.
+    -- Toàn bộ version đã có trong Silver (KHÔNG chỉ is_current), dùng làm
+    -- "mốc" (anchor) để LAG() biết prev_hash cho từng dòng staging. Lấy cả
+    -- lịch sử để rerun idempotent — nếu chỉ lấy is_current, staging trùng
+    -- 1 version cũ sẽ bị LAG() hiểu nhầm "lần đầu xuất hiện", tạo bản sao lỗi.
     SELECT
         listing_id, listing_url, source_part, source_bronze_key,
         valid_from AS crawl_date,

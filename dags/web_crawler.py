@@ -2,33 +2,22 @@
 dags/web_crawler.py
 
 DAG 2 — crawl trực tiếp alonhadat.com.vn theo control-plane
-crawl.listing_progress / crawl.detail_queue (mục 5, 6 tài liệu thiết kế).
+pipeline.listing_progress / pipeline.detail_queue.
 
-File này CHỈ khai báo lịch chạy/retry cho Airflow — toàn bộ logic nghiệp
-vụ nằm ở:
-    - crawler/web_crawler_core.py  (logic thuần, không I/O)
-    - crawler/web_crawler_io.py    (I/O thật: Postgres/HTTP/S3/Proxy)
-    - crawler/proxy_manager.py        (fetch + health-check proxy)
+File này CHỈ khai báo lịch chạy/retry — logic nghiệp vụ nằm ở
+crawler/web_crawler_core.py (thuần), crawler/web_crawler_io.py (I/O thật),
+crawler/proxy_manager.py (proxy). `run_dag2()` là điểm gọi duy nhất, tự
+raise RuntimeError khi stop_reason bất thường để Airflow retry.
 
-`run_dag2()` (trong web_crawler_io.py) là điểm gọi DUY NHẤT — lắp ráp
-mọi factory, chạy 1 lần, tự raise RuntimeError nếu stop_reason bất thường
-(fetch_error/blocked/proxy_exhausted) để Airflow đánh dấu task FAILED và
-kích hoạt retry bên dưới.
+TỰ ĐỘNG HÓA: task cuối `trigger_bronze_to_silver` nối sang DAG 3, DAG 3 tự
+nối sang DAG 4 — cả chuỗi crawl -> Silver -> Gold chạy tự động mỗi giờ chỉ
+từ 1 lịch @hourly duy nhất ở đây. DAG 1 (dataset_loader) đứng ngoài chuỗi,
+trigger tay khi cần.
 
-TỰ ĐỘNG HÓA (mới): task cuối `trigger_bronze_to_silver` nối thẳng sang DAG 3
-(bronze_to_silver) — DAG 3 tự nối tiếp sang DAG 4 (silver_to_gold) ở cuối
-file của nó. Toàn bộ chuỗi crawl -> Silver -> Gold chạy tự động mỗi giờ chỉ
-từ 1 lịch @hourly duy nhất ở đây. DAG 1 (dataset_loader) KHÔNG nằm trong
-chuỗi này — dataset CDN cố định, chỉ cần trigger tay 1 lần khi cần.
-
-`wait_for_completion=True` + `deferrable=True`: task này CHỜ đến khi DAG 3
-(và cả DAG 4 phía sau nó) chạy xong hẳn mới coi là DONE — nhờ vậy
-`max_active_runs=1` của DAG này tự động ngăn 2 chu kỳ hourly chồng lên
-nhau (chu kỳ sau chỉ bắt đầu khi CẢ CHUỖI 3 DAG của chu kỳ trước đã xong).
-`deferrable=True` giải phóng worker slot trong lúc chờ (dùng
-`airflow-triggerer`, đã có sẵn trong docker-compose.yaml) thay vì giữ
-worker "ngủ" chờ suốt — quan trọng vì Spark trong DAG 3 cũng cần worker
-slot riêng (SPARK_MAX_ACTIVE_TASKS=1), không nên bị task chờ này chiếm mất.
+`wait_for_completion=True` + `deferrable=True`: task này chờ cả DAG 3+4
+chạy xong mới DONE, nhờ đó `max_active_runs=1` tự ngăn 2 chu kỳ hourly
+chồng nhau. `deferrable=True` giải phóng worker slot trong lúc chờ (qua
+airflow-triggerer) — quan trọng vì Spark ở DAG 3 cũng cần slot riêng.
 """
 
 from __future__ import annotations
@@ -63,7 +52,7 @@ with DAG(
     crawl_web_detail_pages = PythonOperator(
         task_id="crawl_web_detail_pages",
         python_callable=run_dag2,
-        # Truyền run_id của chính DAG run vào crawler -> crawl.run_state.run_id
+        # Truyền run_id của chính DAG run vào crawler -> pipeline.run_state.run_id
         # khớp trực tiếp với Airflow UI, dễ truy vết khi debug.
         op_kwargs={"run_id": "{{ run_id }}"},
     )

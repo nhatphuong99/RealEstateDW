@@ -72,15 +72,10 @@ def list_bronze_parquet_keys(s3_client=None) -> list[str]:
 
 
 def discover_pending_files() -> int:
-    """Quét S3, insert key Bronze mới vào crawl.bronze_file_state
-    với status='pending' (giá trị DEFAULT của cột).
-
-    Idempotent qua INSERT ... ON CONFLICT (s3_key) DO NOTHING (s3_key là
-    PRIMARY KEY). Dùng execute_values(..., fetch=True) + RETURNING thay vì
-    cur.rowcount, vì rowcount sau executemany không đáng tin.
-
-    Trả về số dòng MỚI thực sự được insert.
-    """
+    """Quét S3, insert key Bronze mới vào pipeline.bronze_file_state (status='pending').
+    Idempotent qua ON CONFLICT (s3_key) DO NOTHING. Dùng execute_values(fetch=True)
+    + RETURNING thay vì cur.rowcount (không đáng tin sau executemany).
+    Trả về số dòng mới thực sự được insert."""
     keys = list_bronze_parquet_keys()
     if not keys:
         return 0
@@ -94,7 +89,7 @@ def discover_pending_files() -> int:
                 inserted = execute_values(
                     cur,
                     """
-                    INSERT INTO crawl.bronze_file_state (s3_key, source)
+                    INSERT INTO pipeline.bronze_file_state (s3_key, source)
                     VALUES %s
                     ON CONFLICT (s3_key) DO NOTHING
                     RETURNING s3_key
@@ -141,7 +136,7 @@ def cleanup_orphaned_tmp_dirs(max_age_hours: float = 12.0) -> int:
 def _mark_processing(conn, s3_key: str) -> None:
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE crawl.bronze_file_state SET status = 'processing' WHERE s3_key = %s",
+            "UPDATE pipeline.bronze_file_state SET status = 'processing' WHERE s3_key = %s",
             (s3_key,),
         )
 
@@ -150,7 +145,7 @@ def _mark_done(conn, s3_key: str, rows_parsed: int, rows_quarantined: int) -> No
     with conn.cursor() as cur:
         cur.execute(
             """
-            UPDATE crawl.bronze_file_state
+            UPDATE pipeline.bronze_file_state
             SET status = 'done',
                 rows_parsed = %s,
                 rows_quarantined = %s,
@@ -166,7 +161,7 @@ def _mark_failed(conn, s3_key: str, error_message: str) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            UPDATE crawl.bronze_file_state
+            UPDATE pipeline.bronze_file_state
             SET status = 'failed',
                 processed_at = now(),
                 last_error = %s
@@ -191,15 +186,10 @@ def _truncate_staging_after_success(conn) -> None:
 
 
 def run_etl_bronze_to_silver(s3_key: str) -> None:
-    """Task 19 — điểm gọi duy nhất cho PythonOperator.
-
-    Xử lý 1 file/lần gọi (không lặp nhiều file trong hàm) để dùng
-    Airflow dynamic task mapping — mỗi file là 1 Task Instance độc lập,
-    retry riêng file lỗi mà không kéo lại cả batch.
-
-    Vòng đời crawl.bronze_file_state: pending -> processing -> done | failed.
-    Lỗi ở bất kỳ bước nào -> đánh dấu failed + last_error rồi raise lại để Airflow tự retry.
-    """
+    """Task 19 — điểm gọi duy nhất cho PythonOperator. Xử lý 1 file/lần gọi
+    (dynamic task mapping — mỗi file 1 Task Instance, retry riêng không kéo cả batch).
+    Vòng đời pipeline.bronze_file_state: pending -> processing -> done | failed;
+    lỗi ở bất kỳ bước nào -> đánh dấu failed + last_error rồi raise để Airflow tự retry."""
     t0 = time.perf_counter()
     conn = psycopg2.connect(get_postgres_dsn())
     conn.autocommit = True
@@ -269,13 +259,13 @@ def run_etl_bronze_to_silver(s3_key: str) -> None:
         conn.close()
 
 def get_pending_s3_keys() -> list[str]:
-    """Lấy danh sách s3_key đang status='pending' trong crawl.bronze_file_state,
+    """Lấy danh sách s3_key đang status='pending' trong pipeline.bronze_file_state,
     dùng làm input cho .expand() của task run_etl_bronze_to_silver."""
     conn = psycopg2.connect(get_postgres_dsn())
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT s3_key FROM crawl.bronze_file_state WHERE status = 'pending' "
+                "SELECT s3_key FROM pipeline.bronze_file_state WHERE status = 'pending' "
                 "ORDER BY discovered_at"
             )
             return [row[0] for row in cur.fetchall()]
@@ -295,7 +285,7 @@ def reset_stuck_files() -> int:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    UPDATE crawl.bronze_file_state
+                    UPDATE pipeline.bronze_file_state
                     SET status = 'pending', last_error = NULL
                     WHERE status IN ('failed', 'processing')
                     """

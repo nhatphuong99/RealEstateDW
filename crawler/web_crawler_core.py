@@ -220,7 +220,7 @@ def classify_fetch_result(result: FetchResult) -> ErrorKind:
 # ============================================================
 
 class ControlPlaneRepo(Protocol):
-    """Thao tác các bảng crawl.listing_progress / detail_queue / run_state."""
+    """Thao tác các bảng pipeline.listing_progress / detail_queue / run_state."""
 
     def apply_daily_reset_if_needed(self, today: date) -> None: ...
     def reclaim_stale_detail_queue(self) -> int: ...
