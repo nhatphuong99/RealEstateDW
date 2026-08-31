@@ -2,24 +2,17 @@
 dags/dataset_loader.py
 
 DAG 1 — tải 77 part cố định (part1..part77.parquet) từ CDN dataset lên S3
-(Bronze layer), theo control-plane crawl.dataset_part_state.
+(Bronze layer), theo control-plane pipeline.dataset_part_state.
 
-File này CHỈ khai báo lịch chạy/retry cho Airflow — toàn bộ logic nghiệp
-vụ nằm ở:
-    - crawler/dataset_loader_core.py  (logic thuần, không I/O)
-    - crawler/dataset_loader_io.py    (I/O thật: Postgres/HTTP/S3)
+File này CHỈ khai báo lịch chạy/retry — logic nghiệp vụ nằm ở
+crawler/dataset_loader_core.py (thuần) và crawler/dataset_loader_io.py (I/O thật).
+Dùng TaskFlow API (`@task`/`.expand()`) áp thẳng lên 2 hàm có sẵn, không viết
+hàm bọc thêm.
 
-Dùng TaskFlow API (`@task`/`.expand()`) áp thẳng lên 2 hàm đã có sẵn trong
-dataset_loader_io.py — KHÔNG viết thêm hàm bọc, giữ đúng nguyên tắc DAG
-file chỉ wiring, không chứa logic nghiệp vụ (giống web_crawler.py
-bên Nhóm B).
-
-Task 2 (`process_one_part`) là dynamic-mapped: mỗi part cần xử lý là 1
-Task Instance riêng, chạy song song có giới hạn — part nào lỗi không ảnh
-hưởng các part khác. KHÔNG tự viết retry loop trong code (xem
-dataset_loader_core.py) — dựa hẳn vào retries/retry_delay của Airflow
-task (quyết định D1). Khác hẳn Nhóm B: CDN ổn định, không proxy/CAPTCHA/
-rate-limit -> không cần state machine phức tạp.
+Task 2 (`process_one_part`) dynamic-mapped: mỗi part là 1 Task Instance
+riêng, lỗi part nào không ảnh hưởng part khác. Không tự viết retry loop —
+dựa vào retries/retry_delay của Airflow (quyết định D1). Khác Nhóm B: CDN
+ổn định, không proxy/CAPTCHA/rate-limit -> không cần state machine phức tạp.
 """
 
 from __future__ import annotations

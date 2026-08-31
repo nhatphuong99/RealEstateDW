@@ -13,10 +13,8 @@
 -- ============================================================================
 
 WITH check_row_count AS (
-    -- COUNT(fact) phải khớp COUNT(silver) tuyệt đối -- nếu Fact JOIN bị
-    -- rớt dòng nào (VD do dim_source trả NULL vì source_bronze_key không
-    -- khớp prefix nào, hoặc cả transaction bị abort giữa chừng khiến 0
-    -- dòng được insert) sẽ lộ ra ngay ở đây.
+    -- COUNT(fact) phải khớp COUNT(silver) tuyệt đối -- lộ ngay nếu Fact JOIN
+    -- rớt dòng (VD dim_source trả NULL) hoặc cả transaction bị abort.
     SELECT
         'row_count_match' AS check_name,
         (SELECT COUNT(*) FROM silver.listing_history)::TEXT AS expected,
@@ -25,10 +23,8 @@ WITH check_row_count AS (
             = (SELECT COUNT(*) FROM gold.fact_listing_price) AS passed
 ),
 check_current_uniqueness AS (
-    -- Đúng 1 dòng is_current=TRUE cho mỗi listing_id, đúng ý nghĩa "chưa
-    -- từng phát hiện version mới hơn thay thế" -- quan trọng vì Fact dùng
-    -- UPSERT, dễ sót logic nếu ETL chạy lại nhiều lần mà thiếu bước đóng
-    -- version cũ.
+    -- Đúng 1 dòng is_current=TRUE/listing_id -- Fact dùng UPSERT, dễ sót
+    -- logic nếu ETL chạy lại nhiều lần mà thiếu bước đóng version cũ.
     SELECT
         'is_current_unique_per_listing' AS check_name,
         '0' AS expected,
@@ -43,10 +39,8 @@ check_current_uniqueness AS (
     ) dup
 ),
 check_reconfirmation_visibility AS (
-    -- Thông tin (KHÔNG phải lỗi) — tỉ lệ dòng có is_reconfirmed=TRUE
-    -- (từng được crawl lại ≥2 lần), phản ánh trực tiếp giới hạn độ phủ
-    -- crawler (mỗi URL chỉ enqueue 1 lần qua UNIQUE(url)). Luôn passed=TRUE,
-    -- chỉ để log số liệu ra output cho báo cáo/dashboard, KHÔNG làm fail task.
+    -- Thông tin (không phải lỗi) — tỉ lệ dòng is_reconfirmed=TRUE (crawl lại
+    -- ≥2 lần), phản ánh giới hạn độ phủ crawler. Luôn passed=TRUE, chỉ để log.
     SELECT
         'reconfirmed_ratio_info' AS check_name,
         'n/a (informational)' AS expected,
@@ -72,10 +66,9 @@ check_fk_not_null AS (
        OR posted_date_key IS NULL
 ),
 check_price_per_m2_flagged AS (
-    -- CHO PHÉP outlier tồn tại, MIỄN LÀ đã được đánh dấu đúng
-    -- price_is_outlier=TRUE ở Silver (không null hóa price_vnd -- xem
-    -- comment cột). Check này chỉ báo lỗi khi có dòng vượt ngưỡng NHƯNG
-    -- CHƯA được flag -- nghĩa là parser bỏ sót, không phải dữ liệu xấu.
+    -- Cho phép outlier tồn tại, miễn đã đánh dấu price_is_outlier=TRUE ở
+    -- Silver. Chỉ báo lỗi khi có dòng vượt ngưỡng nhưng chưa được flag
+    -- -- nghĩa là parser bỏ sót, không phải dữ liệu xấu.
     SELECT
         'price_per_m2_extreme_all_flagged' AS check_name,
         '0' AS expected,
@@ -87,10 +80,9 @@ check_price_per_m2_flagged AS (
       AND NOT price_is_outlier
 ),
 check_area_within_sanitized_bounds AS (
-    -- Regression guard cho bug _sanitize_area() thiếu ngưỡng dưới: mọi
-    -- area_m2 KHÔNG NULL và area_is_outlier=FALSE phải nằm trong [3, 10000]
-    -- -- nếu có dòng lọt ra ngoài, nghĩa là _sanitize_area() đã bị sửa/
-    -- hỏng lại, cần kiểm tra ngay.
+    -- Regression guard cho _sanitize_area(): mọi area_m2 không NULL và
+    -- area_is_outlier=FALSE phải nằm trong [3, 10000] -- lọt ra ngoài
+    -- nghĩa là hàm sanitize đã bị sửa/hỏng, cần kiểm tra ngay.
     SELECT
         'area_within_sanitized_bounds' AS check_name,
         '0' AS expected,

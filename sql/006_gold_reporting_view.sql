@@ -1,37 +1,22 @@
 -- ============================================================================
 -- sql/006_gold_reporting_view.sql
--- Tầng BI (Metabase) — KHÔNG đụng đến dữ liệu Silver/Gold gốc.
+-- Tầng BI (Metabase) — KHÔNG đụng dữ liệu Silver/Gold gốc.
 --
 -- Gồm 3 phần:
---   1. gold.map_district_geo_crosswalk — ánh xạ district_old -> tên khớp
---      GeoJSON quận/huyện cũ (nguồn: gis.vn, snapshot cũ hơn thời điểm hiện
---      hành nên 1 số quận/huyện đã lên Thành phố nhưng GeoJSON còn ghi
---      Thị xã/Huyện).
---   2. gold.map_ward_geo_crosswalk — ánh xạ ward_new -> tên khớp GeoJSON
---      phường/xã mới (nguồn: gis.vn, đã cập nhật sau 01/07/2025). Hiện chỉ
---      có 1 trường hợp lệch thật (data quality issue của alonhadat, không
---      phải lỗi ETL — xem ghi_chu).
---   3. gold.vw_fact_report — view phẳng join Fact + 5 Dim, dùng làm nguồn
---      chính cho mọi Question trong Metabase. Grain giữ nguyên = grain của
---      fact_listing_price (1 dòng = 1 version giá đã quan sát).
+--   1. gold.map_district_geo_crosswalk — ánh xạ district_old -> tên khớp GeoJSON quận/huyện cũ.
+--   2. gold.map_ward_geo_crosswalk — ánh xạ ward_new -> tên khớp GeoJSON phường/xã mới.
+--   3. gold.vw_fact_report — view phẳng join Fact + 5 Dim, nguồn chính cho mọi
+--      Question Metabase. Grain = grain fact_listing_price.
 --
--- Chuẩn hóa Unicode: mọi so khớp text với GeoJSON đều bọc NORMALIZE(..., NFC)
--- 2 chiều — tránh lỗi lệch do 1 bên NFC/1 bên NFD (xem case "Xã Đất Đỏ" đã
--- phát hiện qua đối chiếu thủ công, dù hiển thị giống hệt nhau nhưng so sánh
--- string trực tiếp cho kết quả False). Hàm NORMALIZE() có sẵn từ PostgreSQL
--- 13+ (image postgres:16 đang dùng đáp ứng đủ), không cần cài extension.
+-- Chuẩn hóa Unicode: mọi so khớp text với GeoJSON bọc NORMALIZE(..., NFC) 2 chiều
+-- — tránh lệch do 1 bên NFC/1 bên NFD dù hiển thị giống hệt nhau (case đã gặp:
+-- "Xã Đất Đỏ"). NORMALIZE() có sẵn từ PostgreSQL 13+, không cần cài extension.
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
 -- 1. CROSSWALK — Quận/Huyện cũ (district_old) -> tên khớp GeoJSON
---
--- Nguyên nhân lệch: GeoJSON (gis.vn) là snapshot tại thời điểm các đơn vị
--- này còn là Thị xã/Huyện, trong khi district_old ở Gold ghi đúng loại hình
--- hành chính hiện hành (đã lên Thành phố). Xác nhận qua tra cứu:
---   - Dĩ An, Thuận An: lên Thành phố năm 2020
---   - Tân Uyên: lên Thành phố năm 2023
---   - Bến Cát: lên Thành phố từ 01/05/2024
---   - Phú Mỹ: lên Thành phố (Huyện -> Thành phố)
+-- Nguyên nhân lệch: GeoJSON (gis.vn) là snapshot khi các đơn vị này còn là
+-- Thị xã/Huyện, trong khi district_old ghi đúng loại hình hiện hành (đã lên TP).
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS gold.map_district_geo_crosswalk (
     district_old         VARCHAR(100)  PRIMARY KEY,
@@ -53,12 +38,8 @@ ON CONFLICT (district_old) DO NOTHING;
 
 -- ----------------------------------------------------------------------------
 -- 2. CROSSWALK — Phường/Xã mới (ward_new) -> tên khớp GeoJSON
---
--- Nguyên nhân lệch: data quality issue của NGUỒN alonhadat (field "phường xã
--- mới" ghi sai tiền tố), KHÔNG phải lỗi ETL của dự án — ward_new lấy trực
--- tiếp từ field gốc, không qua transform/crosswalk nào. Đã xác nhận qua
--- Nghị quyết 1685/NQ-UBTVQH15 (hiệu lực 01/07/2025): tên chính thức là
--- "Xã Hóc Môn" (hợp nhất xã Tân Hiệp, xã Tân Xuân và thị trấn Hóc Môn).
+-- Nguyên nhân lệch: data quality issue của nguồn alonhadat (sai tiền tố),
+-- không phải lỗi ETL — ward_new lấy thẳng từ field gốc, không qua transform.
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS gold.map_ward_geo_crosswalk (
     ward_new              VARCHAR(100)  PRIMARY KEY,

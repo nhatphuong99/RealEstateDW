@@ -29,21 +29,15 @@ _VALIDATE_SQL_PATH = _PROJECT_ROOT / "sql" / "queries" / "validate_gold_load.sql
 def run_etl_silver_to_gold() -> None:
     """Task entrypoint duy nhất cho PythonOperator.
 
-    Chạy nguyên văn etl_silver_to_gold.sql — file này đã tự bọc
-    BEGIN;...COMMIT; riêng, nên conn PHẢI ở chế độ autocommit=True để
-    không bị lồng transaction (psycopg2 mặc định tự mở transaction ngầm
-    nếu autocommit=False) — giống hệt cách _run_scd2_merge() xử lý
-    merge_scd2_listing_history.sql trong bronze_file_state_io.py.
+    Chạy nguyên văn etl_silver_to_gold.sql — file đã tự bọc BEGIN;...COMMIT;
+    nên conn PHẢI autocommit=True để không lồng transaction (giống
+    _run_scd2_merge() trong bronze_file_state_io.py).
 
-    Không có control-plane riêng (khác Bronze->Silver): đây là 1
-    transaction full-refresh idempotent duy nhất, không cần theo dõi
-    trạng thái từng dòng/file — lỗi ở bất kỳ bước nào trong 6 bước của
-    etl_silver_to_gold.sql sẽ tự ROLLBACK TOÀN BỘ transaction (nguyên tử) —
-    kể cả các bước Dim đã chạy đúng trước đó — nên nếu gặp
-    row_count_match FAIL với actual=0, khả năng cao là 1 trong 6 bước bị
-    lỗi cứng (VD NOT NULL violation, cột không tồn tại do schema-drift)
-    khiến TOÀN BỘ batch bị rollback, không phải do JOIN chỉ rớt vài dòng —
-    chạy sql/queries/diagnose_gold_join_loss.sql để xác định chính xác.
+    Không có control-plane riêng: 1 transaction full-refresh idempotent duy
+    nhất — lỗi ở bất kỳ bước nào trong 6 bước sẽ ROLLBACK toàn bộ (nguyên tử).
+    Nếu row_count_match FAIL actual=0, khả năng cao là 1 bước lỗi cứng
+    (schema-drift...) làm rollback cả batch — chạy diagnose_gold_join_loss.sql
+    để xác định chính xác.
     """
     t0 = time.perf_counter()
     sql_text = _ETL_SQL_PATH.read_text(encoding="utf-8")

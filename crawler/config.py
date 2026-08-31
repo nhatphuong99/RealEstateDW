@@ -54,15 +54,9 @@ PROXY_MAX_CANDIDATES = _int("PROXY_MAX_CANDIDATES", 200)
 
 # Crawl loop (Nhóm B, DAG 2)
 WEB_CRAWLER_MAX_DETAIL_PAGES_PER_RUN = _int("WEB_CRAWLER_MAX_DETAIL_PAGES_PER_RUN", 1000)
-# 40 phút (không phải 45) — từ khi DAG 2 tự động trigger DAG 3 -> DAG 4 mỗi
-# giờ (xem dags/web_crawler.py), phải chừa buffer đủ cho CẢ 2 DAG đó chạy
-# xong trong phần còn lại của giờ, không chỉ riêng crawl. Ước tính: Spark
-# cold start + parse batch nhỏ (~vài trăm dòng/giờ) + SQL merge SCD2 ở DAG 3
-# thường 2-5 phút; DAG 4 (SQL-only, full-refresh nhưng dữ liệu quy mô đồ án
-# nhỏ) thường <1 phút — 20 phút buffer là dư dả, nhưng theo dõi log
-# [TIMING] thực tế của run_etl_bronze_to_silver()/run_etl_silver_to_gold()
-# sau vài chu kỳ đầu để tinh chỉnh lại nếu cần (VD backlog nhiều file Bronze
-# dồn lại sau downtime sẽ khiến DAG 3 chạy lâu hơn ước tính này).
+# 40 phút — chừa buffer ~20 phút cho DAG 3+4 chạy xong trong cùng giờ (DAG 2
+# @hourly tự trigger tiếp DAG 3->4). Theo dõi log [TIMING] thực tế để tinh
+# chỉnh lại nếu backlog dồn nhiều file Bronze sau downtime.
 WEB_CRAWLER_TIME_BOX_SECONDS = _int("WEB_CRAWLER_TIME_BOX_SECONDS", 45 * 60)
 WEB_CRAWLER_DELAY_MIN_SECONDS = _float("WEB_CRAWLER_DELAY_MIN_SECONDS", 5.0)
 WEB_CRAWLER_DELAY_MAX_SECONDS = _float("WEB_CRAWLER_DELAY_MAX_SECONDS", 10.0)

@@ -1,20 +1,16 @@
 """
 dags/bronze_to_silver.py
 
-DAG 3 — ETL Bronze -> Silver (Phase 2 Spark parse + Phase 3 SQL merge SCD2).
+DAG 3 — ETL Bronze -> Silver (Spark parse + SQL merge SCD2).
 
-TỰ ĐỘNG HÓA (mới): task cuối `trigger_silver_to_gold` nối thẳng sang DAG 4
-(silver_to_gold), hoàn thiện chuỗi crawl -> Silver -> Gold khởi động từ
-DAG 2 (@hourly). `schedule=None` GIỮ NGUYÊN — DAG này không tự chạy theo
-lịch riêng, luôn được DAG 2 trigger.
+Task cuối `trigger_silver_to_gold` nối sang DAG 4, hoàn thiện chuỗi
+crawl -> Silver -> Gold khởi động từ DAG 2. `schedule=None` — DAG này
+luôn được DAG 2 trigger, không tự chạy theo lịch riêng.
 
-Dependency `run_etl.expand(s3_key=keys) >> trigger_silver_to_gold`: task
-trigger chỉ chạy SAU KHI TOÀN BỘ mapped task instance của run_etl (mỗi
-file Bronze pending là 1 instance) hoàn tất — kể cả khi `keys` rỗng (0
-file pending trong chu kỳ này, VD web crawl không phát hiện tin mới),
-Airflow coi 0 mapped instance là thỏa mãn vô điều kiện và vẫn chạy
-trigger_silver_to_gold bình thường -> Gold vẫn refresh (no-op an toàn nhờ
-ETL Gold idempotent, không hại gì).
+`run_etl.expand(s3_key=keys) >> trigger_silver_to_gold`: trigger chỉ chạy
+sau khi mọi mapped instance của run_etl xong — kể cả khi `keys` rỗng (0
+file pending), Airflow vẫn chạy trigger bình thường -> Gold refresh
+no-op an toàn (ETL Gold idempotent).
 """
 
 from __future__ import annotations

@@ -2,43 +2,31 @@
 -- sql/queries/etl_silver_to_gold.sql
 -- ETL Silver -> Gold: full-refresh idempotent, chạy trong 1 transaction.
 --
--- Silver và Gold cùng 1 Postgres (postgres-dw) -> transform thẳng bằng SQL,
--- KHÔNG kéo dữ liệu ra Spark/Python (khác Bronze->Silver, vốn bắt buộc cần
--- Spark để parse HTML thô ở quy mô lớn - CPU-bound, lý do không áp dụng ở
--- đây). Xem kien_truc_tong_hop_he_thong.md.
+-- Silver và Gold cùng 1 Postgres -> transform thẳng bằng SQL, không kéo
+-- dữ liệu ra Spark/Python (khác Bronze->Silver, cần Spark parse HTML thô).
 --
--- Thứ tự BẮT BUỘC: nạp 5 Dim trước (Type 0/1, idempotent qua
--- ON CONFLICT DO NOTHING), rồi mới nạp Fact (JOIN lấy surrogate key).
+-- Thứ tự bắt buộc: nạp 5 Dim trước (idempotent qua ON CONFLICT DO NOTHING),
+-- rồi mới nạp Fact (JOIN lấy surrogate key).
 --
--- Fact dùng ON CONFLICT DO UPDATE (KHÔNG phải DO NOTHING): silver.listing_history
--- không bất biến hoàn toàn -- merge_scd2_listing_history.sql có thể UPDATE
--- is_current/valid_to của các dòng đã tồn tại (khi phát hiện version giá
--- mới) -> Gold phải phản ánh lại đúng, không chỉ insert-once.
+-- Fact dùng ON CONFLICT DO UPDATE (không phải DO NOTHING): silver.listing_history
+-- không bất biến — merge_scd2_listing_history.sql có thể UPDATE is_current/
+-- valid_to của dòng đã tồn tại -> Gold phải phản ánh đúng, không chỉ insert-once.
 --
--- PHÒNG THỦ (quan trọng): toàn bộ cột CHUỖI feed vào dim_location/
--- dim_property_features được bọc COALESCE(..., '') ở CẢ bước nạp Dim LẪN
--- bước JOIN của Fact, dù silver.listing_history đã có NOT NULL DEFAULT ''
--- ở DDL (003). Lý do bọc 2 lớp: nếu vì bất kỳ nguyên nhân gì (regression ở
--- parser, dữ liệu cũ còn sót từ trước khi thêm ràng buộc DDL...) mà 1 cột
--- chuỗi thực sự NULL, KHÔNG bọc COALESCE sẽ khiến INSERT INTO dim_location
--- ném lỗi NOT NULL violation NGAY LẬP TỨC -> abort TOÀN BỘ transaction 6
--- bước (kể cả các Dim khác đã insert đúng) -> fact_listing_price rớt về 0
--- dòng dù silver.listing_history có đầy đủ dữ liệu (đúng dạng triệu chứng
--- "row_count_match: expected=N, actual=0"). Bọc COALESCE biến 1 lỗi cứng
--- (transaction-abort) thành 1 dòng dim_location hợp lệ dạng ''/'' — vẫn có
--- thể lệch dữ liệu (dòng ghép sai nhóm ''), nhưng KHÔNG làm sập cả batch;
--- sql/queries/diagnose_gold_join_loss.sql dùng để phát hiện các dòng bị
--- COALESCE che (so khớp bản gốc IS NULL) nếu cần điều tra thêm.
+-- PHÒNG THỦ: cột CHUỖI feed vào dim_location/dim_property_features bọc
+-- COALESCE(..., '') ở cả bước nạp Dim lẫn JOIN Fact, dù Silver đã NOT NULL
+-- DEFAULT ''. Nếu 1 cột chuỗi thực sự NULL (regression/data cũ), không bọc
+-- COALESCE sẽ khiến INSERT lỗi NOT NULL violation -> abort cả transaction 6
+-- bước -> fact_listing_price rớt về 0 dòng dù Silver có đủ dữ liệu (triệu
+-- chứng "row_count_match: expected=N, actual=0"). COALESCE biến lỗi cứng
+-- thành 1 dòng dim hợp lệ dạng ''/'' — không sập batch, nhưng vẫn có thể
+-- lệch dữ liệu; dùng diagnose_gold_join_loss.sql để điều tra nếu cần.
 -- ============================================================================
 
 BEGIN;
 
 -- ----------------------------------------------------------------------
--- 1. DIM_DATE - lịch liên tục, phủ từ ngày nhỏ nhất đến lớn nhất xuất
---    hiện ở CẢ posted_date, valid_from lẫn last_seen_at (dùng last_seen_at
---    vì last_seen_at có thể muộn hơn valid_from khi tin được kiểm chứng
---    lại nhiều lần — is_reconfirmed=TRUE). Lịch liên tục (không sparse) để
---    dashboard vẽ trend không bị đứt gãy giữa các ngày không có version mới.
+-- 1. DIM_DATE - lịch liên tục, phủ từ ngày nhỏ nhất đến lớn nhất trong
+--    posted_date/valid_from/last_seen_at, để dashboard vẽ trend không đứt gãy.
 -- ----------------------------------------------------------------------
 INSERT INTO gold.dim_date (date_key, full_date, day, month, quarter, year)
 SELECT
@@ -71,10 +59,8 @@ FROM silver.listing_history
 ON CONFLICT (province_new, ward_new, province_old, ward_old, district_old, street) DO NOTHING;
 
 -- ----------------------------------------------------------------------
--- 3. DIM_PROPERTY_TYPE - đúng 10 tổ hợp cố định (5 property_type x 2
---    listing_type). Không cần COALESCE: property_type/listing_type NOT
---    NULL vô điều kiện ở Silver (không thuộc quy ước "" — luôn có giá trị
---    thật, xem is_in_scope()).
+-- 3. DIM_PROPERTY_TYPE - đúng 10 tổ hợp cố định. Không cần COALESCE:
+--    property_type/listing_type NOT NULL vô điều kiện ở Silver.
 -- ----------------------------------------------------------------------
 INSERT INTO gold.dim_property_type (property_type_name, listing_type)
 SELECT DISTINCT property_type, listing_type
@@ -83,13 +69,9 @@ ON CONFLICT (property_type_name, listing_type) DO NOTHING;
 
 -- ----------------------------------------------------------------------
 -- 4. DIM_SOURCE - suy source_name từ prefix source_bronze_key.
---
--- QUAN TRỌNG: đây là bản DUPLICATE CÓ CHỦ ĐÍCH của logic Python
--- parser.bronze_to_silver_core.infer_source_from_bronze_key() -- SQL
--- không gọi được hàm Python. Nếu sau này đổi convention đặt tên S3 key
--- (bronze/dataset/... | bronze/web/...) PHẢI sửa đồng bộ CẢ 2 NƠI
--- (hàm Python đó + khối CASE này, lặp lại 2 lần trong file này: ở đây
--- và ở bước 6 khi JOIN Fact).
+-- Duplicate CÓ CHỦ ĐÍCH của hàm Python infer_source_from_bronze_key()
+-- (SQL không gọi được) — đổi convention S3 key phải sửa đồng bộ cả 2 nơi
+-- (hàm Python + khối CASE này, lặp lại ở bước 6 khi JOIN Fact).
 -- ----------------------------------------------------------------------
 INSERT INTO gold.dim_source (source_name, source_part)
 SELECT DISTINCT
@@ -118,18 +100,14 @@ FROM silver.listing_history
 ON CONFLICT (feature_key) DO NOTHING;
 
 -- ----------------------------------------------------------------------
--- 6. FACT_LISTING_PRICE - UPSERT (không phải insert-only, xem lý do ở
---    đầu file). JOIN lấy surrogate key từ dim_location/dim_property_type/
---    dim_source vừa nạp — điều kiện JOIN phải dùng CÙNG COALESCE như bước
---    2/5, nếu không dim đã có '' nhưng Silver vẫn đưa NULL vào so sánh
---    ('' = NULL luôn UNKNOWN trong SQL) sẽ làm JOIN rớt mất dòng đó dù
---    dim tương ứng đã tồn tại đúng.
+-- 6. FACT_LISTING_PRICE - UPSERT (không phải insert-only, xem đầu file).
+--    JOIN lấy surrogate key từ Dim vừa nạp — điều kiện JOIN dùng CÙNG
+--    COALESCE như bước 2/5, nếu không dim có '' nhưng Silver đưa NULL vào
+--    so sánh ('' = NULL luôn UNKNOWN) sẽ làm JOIN rớt dòng dù dim đã tồn tại.
 --
---    feature_key KHÔNG join dim_property_features mà gọi lại
---    gold.compute_feature_key() trực tiếp -- hàm IMMUTABLE, NULL-safe (có
---    COALESCE bên trong), tránh lỗi NULL-in-JOIN khi các cột has_*/
---    owner_direct là BOOLEAN nullable (NULL = NULL luôn UNKNOWN trong SQL,
---    JOIN theo cột sẽ làm rớt mất các dòng có cột NULL).
+--    feature_key gọi lại gold.compute_feature_key() thay vì JOIN
+--    dim_property_features — hàm IMMUTABLE, NULL-safe, tránh JOIN rớt dòng
+--    khi has_*/owner_direct là BOOLEAN nullable.
 -- ----------------------------------------------------------------------
 INSERT INTO gold.fact_listing_price (
     listing_key, listing_id, listing_url,

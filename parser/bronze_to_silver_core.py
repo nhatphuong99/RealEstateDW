@@ -2,22 +2,14 @@
 parser/bronze_to_silver_core.py
 
 Logic thuần parse HTML tin đăng alonhadat.com.vn -> ParsedListing hoặc ParseError.
-Không import I/O libs, chỉ nhận bytes HTML + tham số ngữ cảnh (url, crawl_date,
-source_bronze_key, source_part). Có thể test độc lập, dùng lại cho Spark mapPartitions
-hoặc script debug.
+Không import I/O libs — chỉ nhận bytes HTML + ngữ cảnh (url, crawl_date,
+source_bronze_key, source_part). Test độc lập được, dùng lại cho Spark mapPartitions.
 
-QUY ƯỚC DỰ ÁN (áp dụng từ Phase 5, để chuẩn bị cho Gold layer):
-- Trường KIỂU CHUỖI (title, orientation, legal_status, address_*) dùng "" khi
-  thiếu dữ liệu, KHÔNG dùng NULL. Lý do: Postgres coi NULL là "khác nhau" trong
-  UNIQUE constraint (VD: gold.dim_location), dùng "" cho phép upsert idempotent
-  đúng nghĩa mà không cần bước chuẩn hóa riêng ở tầng ETL Gold.
-- Trường KIỂU SỐ/DATE (price_vnd, area_m2, length_m, floors, bedrooms...) vẫn
-  giữ NULL khi thiếu — KHÔNG đổi sang 0, tránh làm nhiễu AVG()/SUM(). Khi
-  *_raw (price_raw, area_raw) là "", giá trị số suy ra từ nó vẫn phải là NULL
-  (đã đúng qua parse_vn_number(), vì "" nằm trong _MISSING_MARKERS).
-- Trường KIỂU BOOLEAN nullable (has_dining_room, has_kitchen...) giữ nguyên
-  NULL = "không xác định" — đây là quy ước cũ, KHÔNG đổi, vì NULL ở đây mang
-  ý nghĩa tri-state hợp lệ (unknown), khác với "thiếu dữ liệu chuỗi".
+QUY ƯỚC DỰ ÁN:
+- Trường CHUỖI (title, orientation, legal_status, address_*): dùng "" khi thiếu,
+  KHÔNG dùng NULL — để UNIQUE constraint (gold.dim_location) upsert idempotent đúng.
+- Trường SỐ/DATE (price_vnd, area_m2, floors...): giữ NULL khi thiếu, không đổi sang 0.
+- Trường BOOLEAN nullable (has_dining_room...): giữ NULL = "không xác định" (tri-state).
 """
 
 
@@ -180,24 +172,18 @@ _MAX_PRICE_PER_M2_VND = Decimal("5000000000")
 
 def _sanitize_dimension(value: Optional[Decimal], max_valid: Decimal) -> Optional[Decimal]:
     """Null hóa width_m/length_m/street_width_m vượt ngưỡng hoặc <=0.
-    Option A (đã chốt): KHÔNG gắn cờ riêng — 3 trường này không phải measure
-    chính của đồ án, chấp nhận mất khả năng phân biệt "null vì outlier" vs
-    "null vì field gốc thiếu" để giữ đơn giản."""
+    Không gắn cờ riêng — 3 trường này không phải measure chính, chấp nhận
+    mất khả năng phân biệt "null vì outlier" vs "null vì thiếu" để đơn giản."""
     if value is None or value <= 0 or value > max_valid:
         return None
     return value
 
 
 def _sanitize_area(area_m2: Optional[Decimal]) -> tuple[Optional[Decimal], bool]:
-    """area_m2 vượt _MAX_AREA_M2 HOẶC dưới _MIN_AREA_M2 -> null hóa + gắn
-    area_is_outlier=True. BẮT BUỘC có cờ riêng (khác 3 trường kích thước ở
-    trên) vì area_m2 feed trực tiếp vào price_per_m2_vnd (GENERATED) — cần
-    dấu vết audit để không lẫn với area_is_undetermined (site tự ghi "KXĐ",
-    nguyên nhân khác hẳn).
-
-    SỬA (Phase 5): bản trước chỉ chặn đầu trên. Bổ sung ngưỡng dưới sau khi
-    validate_gold_load.sql phát hiện price_per_m2_vnd bùng nổ do area_m2
-    quá nhỏ (xem comment _MIN_AREA_M2)."""
+    """area_m2 vượt _MAX_AREA_M2 hoặc dưới _MIN_AREA_M2 -> null hóa + gắn
+    area_is_outlier=True. Bắt buộc có cờ riêng (khác 3 trường kích thước trên)
+    vì area_m2 feed trực tiếp vào price_per_m2_vnd (GENERATED) — cần audit,
+    không lẫn với area_is_undetermined (site tự ghi "KXĐ")."""
     if area_m2 is not None and (area_m2 > _MAX_AREA_M2 or area_m2 < _MIN_AREA_M2):
         return None, True
     return area_m2, False
@@ -206,27 +192,14 @@ def _sanitize_area(area_m2: Optional[Decimal]) -> tuple[Optional[Decimal], bool]
 def _detect_price_outlier(
     price_vnd: Optional[Decimal], area_m2: Optional[Decimal]
 ) -> bool:
-    """Phát hiện price_vnd/area_m2 vượt _MAX_PRICE_PER_M2_VND — CHỈ gắn cờ,
-    KHÔNG null hóa price_vnd (khác area_is_outlier). Quyết định có chủ đích:
-    - Null hóa price_vnd sẽ đụng CHECK constraint chk_price_negotiable_null
-      (price_vnd IS NULL chỉ khi price_is_negotiable=TRUE) — ở đây giá VẪN
-      tồn tại thật trên site, chỉ đáng ngờ độ tin cậy, khác hẳn "Thỏa thuận"
-      thật (price_value=0).
-    - Giữ nguyên price_vnd để audit/truy vết, lọc ở tầng dashboard/Gold qua
-      cờ price_is_outlier thay vì xóa dữ liệu ở Silver.
+    """Phát hiện giá/m2 vượt _MAX_PRICE_PER_M2_VND — chỉ gắn cờ, KHÔNG null hóa
+    price_vnd (khác area_is_outlier): giá vẫn tồn tại thật trên site, chỉ đáng
+    ngờ độ tin cậy (khác "Thỏa thuận" thật = price_value=0), lọc ở Gold/dashboard
+    qua cờ này thay vì xóa dữ liệu. Dùng area_m2 ĐÃ sanitize (gọi sau _sanitize_area()).
 
-    Dùng area_m2 ĐÃ sanitize (sau _sanitize_area(), gọi hàm này SAU khi có
-    area_m2 cuối cùng) — nếu area_m2 đã bị null hóa vì lý do khác (quá nhỏ/
-    quá lớn), area_is_outlier đã đủ đánh dấu vấn đề của dòng đó, không cần
-    (và không tính được) price_is_outlier nữa.
-
-    3 pattern lỗi thực tế phát hiện Phase 5 (không phân biệt trong code,
-    chỉ cần bắt đúng triệu chứng chung — giá/m2 phi lý vật lý):
-    1. price_raw dạng "X tỷ / m²" nhưng price_vnd = X(tỷ) × area_m2 (lỗi
-       phía nguồn — site tự nhân giá/m2 nhập nhầm thành tổng giá).
-    2. area_m2 quá nhỏ (đã xử lý riêng ở _sanitize_area, không lặp ở đây).
-    3. price_vnd gấp ~100 lần giá thật ghi trong tiêu đề (nghi site xử lý
-       sai dấu phẩy thập phân kiểu Việt Nam, VD "6,9 tỷ" -> đọc nhầm)."""
+    3 nguyên nhân thực tế: (1) price_raw "X tỷ/m²" nhưng site tự nhân thành
+    tổng giá, (2) area_m2 quá nhỏ (đã xử lý riêng), (3) sai dấu phẩy thập phân
+    kiểu VN (VD "6,9 tỷ" đọc nhầm) khiến giá gấp ~100 lần thật."""
     if price_vnd is None or area_m2 is None or area_m2 == 0:
         return False
     return (price_vnd / area_m2) > _MAX_PRICE_PER_M2_VND
@@ -253,7 +226,7 @@ def infer_source_from_bronze_key(source_bronze_key: str) -> str:
     ranh giới Medallion (Silver = clean raw grain).
 
     1 nguồn sự thật duy nhất, dùng chung cho:
-    - control-plane: crawl.bronze_file_state.source (bronze_file_state_io.py)
+    - control-plane: pipeline.bronze_file_state.source (bronze_file_state_io.py)
     - Gold ETL: gold.dim_source.source_name (silver_to_gold_io.py)
     Tránh lặp lại logic ở 2 nơi rồi lệch nhau, cùng pattern với
     silver.compute_row_hash()/gold.compute_feature_key() (1 nguồn sự thật)."""
@@ -309,18 +282,11 @@ def _parse_moreinfor_table(section: Tag) -> dict[str, Tag]:
 
 def parse_old_address(raw: str) -> tuple[str, str, str]:
     """Tách (ward_old, district_old, province_old) từ address_old_raw dạng
-    'Đường X, Phường/Xã/Thị Trấn Y, Quận/Huyện/Thành phố Z, Tỉnh/Thành (cũ)'.
-    Lấy 3 phần cuối theo dấu ',' từ phải. Giữ nguyên tiền tố
-    (Phường/Xã/Quận/Huyện...) trong giá trị trả về.
-
-    SỬA (phát hiện Phase 5): bản trước bỏ qua phần tỉnh/thành với giả định
-    "cấp tỉnh không đổi" — SAI. Thực tế có tin đăng tỉnh/thành ở địa chỉ CŨ
-    khác địa chỉ MỚI (VD: Xã Long Điền — cũ thuộc 'Bà Rịa Vũng Tàu', mới
-    thuộc 'Hồ Chí Minh', do sáp nhập địa giới hành chính). PHẢI lưu riêng
-    province_old, không được coi là trùng address_province_new.
-
-    Trả về ("", "", "") khi raw rỗng hoặc không đủ 3 phần — theo quy ước
-    dự án dùng "" cho trường kiểu chuỗi thiếu dữ liệu (xem module docstring)."""
+    'Đường X, Phường/Xã Y, Quận/Huyện Z, Tỉnh/Thành (cũ)' — lấy 3 phần cuối
+    theo dấu ',' từ phải, giữ nguyên tiền tố. PHẢI lưu riêng province_old vì
+    có tin lệch tỉnh cũ/mới do sáp nhập địa giới (VD: Long Điền cũ thuộc
+    'Bà Rịa Vũng Tàu', mới thuộc 'Hồ Chí Minh') — không coi là trùng province_new.
+    Trả về ("", "", "") khi raw rỗng hoặc không đủ 3 phần."""
     if not raw:
         return "", "", ""
     parts = [p.strip() for p in raw.split(",")]
@@ -343,15 +309,10 @@ IN_SCOPE_PROPERTY_TYPES = {
 }
 
 def is_in_scope(listing: ParsedListing) -> bool:
-    """Kiểm tra tin đăng có thuộc phạm vi đồ án không. Ngoài phạm vi — bị bỏ qua lặng lẽ
-    ở parse_partition(), không ghi vào staging lẫn quarantine.
-
-    QUAN TRỌNG: lọc theo address_province_new (địa chỉ HIỆN TẠI, structured
-    field itemprop="addressRegion"), TUYỆT ĐỐI KHÔNG dùng address_province_old.
-    address_province_old là tỉnh/thành TRƯỚC sáp nhập địa giới hành chính,
-    có thể khác address_province_new (VD: Xã Long Điền — cũ thuộc 'Bà Rịa
-    Vũng Tàu', mới thuộc 'Hồ Chí Minh') — lọc nhầm theo province_old sẽ
-    loại bỏ sai các tin đăng thực sự thuộc TP.HCM hiện tại."""
+    """Kiểm tra tin có thuộc phạm vi đồ án không — ngoài phạm vi bị bỏ qua lặng lẽ
+    ở parse_partition(), không ghi staging lẫn quarantine.
+    Lọc theo address_province_new (địa chỉ HIỆN TẠI) — KHÔNG dùng
+    address_province_old (tỉnh trước sáp nhập, có thể khác province_new)."""
     return (
         listing.address_province_new == IN_SCOPE_PROVINCE
         and listing.listing_type in IN_SCOPE_LISTING_TYPES

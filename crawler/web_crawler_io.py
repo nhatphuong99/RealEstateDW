@@ -2,7 +2,7 @@
 crawler/web_crawler_io.py
 
 Implement các Protocol từ web_crawler_core.py:
-    - PsycopgControlPlaneRepo -> Postgres (crawl.listing_progress / detail_queue / run_state)
+    - PsycopgControlPlaneRepo -> Postgres (pipeline.listing_progress / detail_queue / run_state)
     - RequestsPageFetcher     -> HTTP GET qua proxy
     - S3ParquetBufferWriter   -> buffer + flush S3 (boto3 + pyarrow)
     - SystemClock             -> thời gian thật (Asia/Ho_Chi_Minh)
@@ -84,7 +84,7 @@ class SystemClock:
 
 
 # ============================================================
-# 2. Control-plane repo (psycopg2) — crawl.listing_progress / detail_queue / run_state
+# 2. Control-plane repo (psycopg2) — pipeline.listing_progress / detail_queue / run_state
 # ============================================================
 
 LISTING_TYPES = ("can-ban", "cho-thue")
@@ -137,7 +137,7 @@ class PsycopgControlPlaneRepo:
             psycopg2.extras.execute_values(
                 cur,
                 """
-                INSERT INTO crawl.listing_progress
+                INSERT INTO pipeline.listing_progress
                     (listing_type, property_type, current_page, status, crawl_date)
                 VALUES %s
                 ON CONFLICT (listing_type, property_type, crawl_date) DO NOTHING
@@ -151,7 +151,7 @@ class PsycopgControlPlaneRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                UPDATE crawl.detail_queue
+                UPDATE pipeline.detail_queue
                 SET status = 'pending', claimed_at = NULL
                 WHERE status = 'processing'
                 RETURNING id
@@ -167,10 +167,10 @@ class PsycopgControlPlaneRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                UPDATE crawl.listing_progress
+                UPDATE pipeline.listing_progress
                 SET current_page = current_page + 1, updated_at = now()
                 WHERE id = (
-                    SELECT id FROM crawl.listing_progress
+                    SELECT id FROM pipeline.listing_progress
                     WHERE status = 'active' AND crawl_date = %s
                     ORDER BY current_page ASC, id ASC
                     FOR UPDATE SKIP LOCKED
@@ -194,7 +194,7 @@ class PsycopgControlPlaneRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                UPDATE crawl.listing_progress
+                UPDATE pipeline.listing_progress
                 SET status = 'exhausted', updated_at = now()
                 WHERE id = %s
                 """,
@@ -214,7 +214,7 @@ class PsycopgControlPlaneRepo:
             psycopg2.extras.execute_values(
                 cur,
                 """
-                INSERT INTO crawl.detail_queue
+                INSERT INTO pipeline.detail_queue
                     (url, discovered_page_id, crawl_date)
                 VALUES %s
                 ON CONFLICT (url) DO NOTHING
@@ -227,10 +227,10 @@ class PsycopgControlPlaneRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                UPDATE crawl.detail_queue
+                UPDATE pipeline.detail_queue
                 SET status = 'processing', claimed_at = now()
                 WHERE id = (
-                    SELECT id FROM crawl.detail_queue
+                    SELECT id FROM pipeline.detail_queue
                     WHERE status = 'pending'
                     ORDER BY discovered_at ASC
                     FOR UPDATE SKIP LOCKED
@@ -247,14 +247,14 @@ class PsycopgControlPlaneRepo:
     def mark_detail_done(self, queue_id: int) -> None:
         with self._cursor() as cur:
             cur.execute(
-                "UPDATE crawl.detail_queue SET status = 'done' WHERE id = %s",
+                "UPDATE pipeline.detail_queue SET status = 'done' WHERE id = %s",
                 (queue_id,),
             )
 
     def mark_detail_failed(self, queue_id: int) -> None:
         with self._cursor() as cur:
             cur.execute(
-                "UPDATE crawl.detail_queue SET status = 'failed' WHERE id = %s",
+                "UPDATE pipeline.detail_queue SET status = 'failed' WHERE id = %s",
                 (queue_id,),
             )
 
@@ -264,7 +264,7 @@ class PsycopgControlPlaneRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO crawl.run_state (run_id, started_at)
+                INSERT INTO pipeline.run_state (run_id, started_at)
                 VALUES (%s, now())
                 ON CONFLICT (run_id) DO NOTHING
                 """,
@@ -281,7 +281,7 @@ class PsycopgControlPlaneRepo:
         with self._cursor() as cur:
             cur.execute(
                 """
-                UPDATE crawl.run_state
+                UPDATE pipeline.run_state
                 SET ended_at = now(),
                     stopped_reason = %s,
                     detail_pages_done = %s,
@@ -532,7 +532,7 @@ def run_dag2(run_id: Optional[str] = None) -> str:
             f"DAG2 run_id={run_id} thất bại: stop_reason={result.stop_reason.value}, "
             f"chỉ crawl được {result.detail_pages_done} trang (< "
             f"{config.WEB_CRAWLER_MIN_SUCCESS_PAGES} trang tối thiểu). "
-            f"Chi tiết: bảng crawl.run_state hoặc log task phía trên."
+            f"Chi tiết: bảng pipeline.run_state hoặc log task phía trên."
         )
 
     if result.stop_reason not in NORMAL_STOP_REASONS:

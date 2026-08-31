@@ -1,10 +1,10 @@
 """
 parser/config.py
 
-Cấu hình ĐẶC THÙ cho package parser (Spark IO layer, Phase 2). Chỉ chứa
-tham số riêng của parser (SparkSession). Tham số DÙNG CHUNG với crawler/
-(DSN Postgres, S3 bucket, AWS region, RUNNING_IN_CONTAINER) import lại
-từ config.py gốc — KHÔNG định nghĩa trùng.
+Cấu hình đặc thù cho package parser (Spark IO layer). Chỉ chứa tham số
+riêng của parser (SparkSession) — tham số dùng chung với crawler/ (DSN
+Postgres, S3 bucket, AWS region, RUNNING_IN_CONTAINER) import lại từ
+config.py gốc, không định nghĩa trùng.
 
 parser/bronze_to_silver_core.py (logic thuần) KHÔNG import module này.
 """
