@@ -22,7 +22,13 @@ CREATE TABLE IF NOT EXISTS pipeline.listing_progress (
 CREATE TABLE IF NOT EXISTS pipeline.detail_queue (
     id                  SERIAL PRIMARY KEY,
     url                 TEXT UNIQUE NOT NULL,
-    status              TEXT NOT NULL DEFAULT 'pending', -- pending/processing/done/failed
+    -- pending -> processing -> fetched -> flushed -> done (thành công)
+    --                   |            |         |
+    --                   +------------+---------+--> failed (hết retry/proxy)
+    -- fetched = đã fetch HTML xong, đang chờ tới lượt flush lên S3 (RAM only)
+    -- flushed = đã ghi an toàn lên S3 (.inprogress), chưa chắc có bản final
+    -- done    = đã nằm trong file .parquet final -> Silver đọc được
+    status              TEXT NOT NULL DEFAULT 'pending',
     discovered_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     claimed_at          TIMESTAMPTZ,
     discovered_page_id  INT REFERENCES pipeline.listing_progress(id),

@@ -72,6 +72,7 @@ x-airflow-common:
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CELERY__BROKER_TRANSPORT_OPTIONS: '{"visibility_timeout": 21600}'
     AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
@@ -90,7 +91,7 @@ x-airflow-common:
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     PYTHONPATH: '/opt/airflow'
     JAVA_HOME: /usr/lib/jvm/default-java
-    SPARK_JARS_DIR: /opt/spark-jars   # parser/config.py glob toàn bộ jar trong này (JDBC + hadoop-aws + sdk-bundle)
+    SPARK_JARS_DIR: /opt/spark-jars   # parser/config.py glob toàn bộ jar trong này (JDBC)
 
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags

@@ -6,11 +6,30 @@ Mọi I/O (DB/HTTP/S3/Proxy) được inject qua Protocol → dễ unit test b�
 không cần Airflow, Postgres hay mạng thật.
 
 I/O thật nằm ở crawler/web_crawler_io.py.
+
+Vòng đời status của 1 URL trong detail_queue (xem sql/001_pipeline_schema.sql):
+    pending -> processing -> fetched -> flushed -> done
+                    |            |         |
+                    +------------+---------+--> failed (hết retry/proxy)
+
+- fetched: đã fetch HTML xong, đang chờ tới lượt flush lên S3 (chỉ có trong RAM).
+- flushed: đã ghi an toàn lên S3 (.inprogress), CHƯA CHẮC có bản final tương ứng.
+- done:    đã nằm trong file .parquet final -> Silver layer đọc được.
+
+Bảo vệ dữ liệu khi crash giữa chừng gồm 3 lớp:
+  1. try/finally quanh vòng lặp chính -> luôn cố flush final + finalize run_state
+     khi có exception Python (không bắt được SIGKILL/OOM).
+  2. update_run_progress() ghi incremental sau mỗi lần flush trung gian ->
+     run_state luôn khớp với dữ liệu thực đã lên S3, kể cả khi bị kill cứng.
+  3. _reconcile_crashed_runs() (Lớp 2) chạy đầu mỗi run kế tiếp -> promote
+     .inprogress của run đã chết (SIGKILL/OOM, try/finally không kịp chạy)
+     thành final nếu đã đạt min_success_pages, khôi phục cả detail_queue.
 """
 
 
 from __future__ import annotations
 
+import logging
 import random
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -19,6 +38,8 @@ from typing import Optional, Protocol, Sequence
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger("web_crawler_core")
 
 
 # ============================================================
@@ -79,6 +100,14 @@ class StopReason(str, Enum):
     - FETCH_ERROR: hết retry cùng proxy cho lỗi mạng/server → dừng ngay.
     - PROXY_EXHAUSTED: hết proxy trong pool (kể cả sau 1 lần refill) khi gặp PROXY_ISSUE.
     Cả hai vẫn có thể coi là thành công nếu đã đạt min_success_pages.
+    - CRASHED: exception Python không lường trước, bắt được nhờ try/finally
+      (KHÔNG bắt được SIGKILL/OOM — xem _reconcile_crashed_runs()).
+    - RECOVERED: run trước đó bị crash cứng (SIGKILL/OOM), được
+      _reconcile_crashed_runs() ở run sau khôi phục thành công (đã đạt
+      min_success_pages, promote .inprogress -> final thành công).
+    - INCOMPLETE: run trước đó bị crash cứng nhưng KHÔNG đủ điều kiện khôi
+      phục (chưa đạt min_success_pages, hoặc không tìm thấy .inprogress) —
+      dữ liệu (nếu có) coi như mất, chỉ đóng sổ run_state để không bị quét lại.
     """
 
     MAX_PAGES = "max_pages"
@@ -86,6 +115,9 @@ class StopReason(str, Enum):
     NO_MORE_DATA = "no_more_data"
     FETCH_ERROR = "fetch_error"
     PROXY_EXHAUSTED = "proxy_exhausted"
+    CRASHED = "crashed"
+    RECOVERED = "recovered"
+    INCOMPLETE = "incomplete"
 
 
 class ErrorKind(str, Enum):
@@ -153,6 +185,23 @@ class BronzeRecord:
     html: bytes   # LUÔN raw bytes, KHÔNG base64
 
 
+@dataclass(frozen=True)
+class PromotedFile:
+    """Kết quả promote .inprogress -> final (Lớp 2 - _reconcile_crashed_runs)."""
+
+    final_key: str
+    urls: list[str]
+
+
+@dataclass(frozen=True)
+class IncompleteRun:
+    """1 dòng run_state có ended_at IS NULL — ứng viên cho reconciliation."""
+
+    run_id: str
+    started_at: datetime
+    detail_pages_done: int
+
+
 # ============================================================
 # 3. Hàm thuần (pure function) — parse HTML, không I/O thật
 # ============================================================
@@ -213,7 +262,6 @@ def classify_fetch_result(result: FetchResult) -> ErrorKind:
     return ErrorKind.FETCH_ERROR
 
 
-
 # ============================================================
 # 4. Protocol (interface) cho các thành phần I/O thật
 #    -> implement ở web_crawler_io.py, ở đây chỉ cần fake để test.
@@ -230,9 +278,42 @@ class ControlPlaneRepo(Protocol):
         self, urls: Sequence[str], discovered_page_id: int, crawl_date: date
     ) -> None: ...
     def claim_detail_task(self) -> Optional[DetailTask]: ...
-    def mark_detail_done(self, queue_id: int) -> None: ...
+
+    def mark_detail_fetched(self, queue_id: int) -> None:
+        """processing -> fetched. Gọi ngay sau buffer.add() (HTML đã fetch
+        xong nhưng còn chỉ nằm trong RAM, chưa flush lên S3)."""
+        ...
+
+    def mark_details_flushed(self, queue_ids: Sequence[int]) -> None:
+        """fetched -> flushed. CHỈ gọi sau khi buffer.flush(final=False)
+        thành công (đã ghi an toàn lên S3 dưới dạng .inprogress)."""
+        ...
+
+    def mark_details_done(self, queue_ids: Sequence[int]) -> None:
+        """fetched/flushed -> done. CHỈ gọi sau khi buffer.flush(final=True)
+        thành công (đã nằm trong file .parquet final)."""
+        ...
+
+    def mark_urls_done(self, urls: Sequence[str]) -> None:
+        """Như mark_details_done() nhưng theo url — dùng cho Lớp 2
+        (_reconcile_crashed_runs), vì process reconciliation không còn giữ
+        list queue_id gốc của run đã chết, chỉ đọc lại được url từ parquet."""
+        ...
+
     def mark_detail_failed(self, queue_id: int) -> None: ...
     def init_run_state(self, run_id: str) -> None: ...
+
+    def update_run_progress(self, run_id: str, detail_pages_done: int) -> None:
+        """Cập nhật detail_pages_done incremental (không đụng ended_at/
+        stopped_reason) ngay sau mỗi lần flush trung gian — lưới an toàn
+        cho trường hợp bị kill cứng giữa 2 lần flush."""
+        ...
+
+    def list_incomplete_runs(self, older_than_seconds: int) -> list[IncompleteRun]:
+        """Lớp 2 — trả về các run_state có ended_at IS NULL và started_at
+        đã đủ cũ (chắc chắn không phải run hiện tại đang chạy)."""
+        ...
+
     def finalize_run_state(
         self,
         run_id: str,
@@ -274,6 +355,24 @@ class BufferWriter(Protocol):
         flush thật, None nếu buffer rỗng."""
         ...
 
+    def promote_inprogress_to_final(
+        self, run_id: str, crawl_date: date
+    ) -> Optional[PromotedFile]:
+        """Lớp 2: đổi .inprogress của 1 run ĐÃ CHẾT thành final, đọc luôn
+        cột url trong đó để repo cập nhật detail_queue. Trả None nếu không
+        tìm thấy .inprogress lẫn final (run chết trước khi flush lần nào)."""
+        ...
+
+    def delete_inprogress(self, run_id: str, crawl_date: date) -> None:
+        """Lớp 2: dọn .inprogress của 1 run ĐÃ CHẾT nhưng KHÔNG đủ điều kiện
+        promote (chưa đạt min_success_pages) — run_state đã finalize INCOMPLETE
+        nên sẽ không được xét lại lần nào nữa, phải dọn ngay tại đây, nếu
+        không file sẽ mồ côi vĩnh viễn (cleanup_orphaned_inprogress() không
+        đụng tới vì file này không có bản final tương ứng). Không tồn tại
+        thì bỏ qua êm, không log ồn (trường hợp bình thường: crash trước
+        khi kịp flush lần nào)."""
+        ...
+
 
 class Clock(Protocol):
     """Bọc datetime.now()/time.monotonic()/sleep() để test không cần chờ
@@ -289,8 +388,17 @@ class Clock(Protocol):
 # ============================================================
 
 class WebCrawlerCore:
-    """Điều phối DAG 2 (mục 6). 
+    """Điều phối DAG 2 (mục 6).
     Không tự tạo DB/HTTP/S3 — mọi phụ thuộc inject qua constructor để dễ unit test."""
+
+    # Ngưỡng coi 1 run là "chắc chắn đã chết" cho reconciliation (Lớp 2).
+    # Dùng chung giá trị với threshold của reclaim_stale_detail_queue() (2 giờ)
+    # — 2 giờ (thay vì đúng 1 chu kỳ hourly) để chừa dư buffer cho tình huống
+    # Celery/Redis redeliver task (visibility_timeout, xem error_log.md —
+    # task "pause" ~1 giờ rồi tự resume) hoặc run đang retry/đổi proxy kéo dài
+    # hợp lệ (_fetch_with_retry không bị chặn bởi time_box giữa các lần retry).
+    # Tránh reclaim/reconcile oan 1 run vẫn đang thực sự sống.
+    RECONCILE_STALE_RUN_AFTER_SECONDS = 2 * 60 * 60
 
     def __init__(
         self,
@@ -313,8 +421,18 @@ class WebCrawlerCore:
     # -------- entrypoint gọi từ Airflow PythonOperator --------
 
     def run(self, run_id: str) -> RunResult:
-        """Chạy 1 lần DAG 2, trả về RunResult (lý do dừng + số trang crawl)."""
+        """Chạy 1 lần DAG 2, trả về RunResult (lý do dừng + số trang crawl).
+
+        'done' trong detail_queue chỉ được ghi SAU KHI dữ liệu đã flush
+        thành công lên S3 (fetched -> flushed -> done), đảm bảo
+        detail_queue/run_state luôn khớp với dữ liệu thực tế trên S3.
+        """
         today = self.clock.now().date()
+
+        # Lớp 2: khôi phục run bị SIGKILL/OOM (try/finally không kịp chạy)
+        # TRƯỚC KHI động tới detail_queue của run hiện tại — để các dòng
+        # 'flushed' thuộc run vừa khôi phục không bị reclaim giật oan.
+        self._reconcile_crashed_runs()
 
         self.repo.apply_daily_reset_if_needed(today)
         self.repo.reclaim_stale_detail_queue()
@@ -325,58 +443,147 @@ class WebCrawlerCore:
         detail_pages_done = 0
         pages_since_flush = 0
         early_flush_done = False  # đã flush sớm khi đạt min_success_pages lần đầu chưa
+        # Toàn bộ queue_id đã fetch trong run này — KHÔNG bao giờ clear, vì
+        # buffer.flush() mỗi lần đều re-serialize toàn bộ buffer tích luỹ từ đầu run.
+        all_fetched_queue_ids: list[int] = []
 
         stop_reason: Optional[StopReason] = None
 
-        while stop_reason is None:
-            if detail_pages_done >= self.config.max_detail_pages_per_run:
-                stop_reason = StopReason.MAX_PAGES
-                break
-
-            if self.clock.monotonic() - start_monotonic >= self.config.time_box_seconds:
-                stop_reason = StopReason.TIME_BOX
-                break
-
-            detail_task = self.repo.claim_detail_task()
-
-            if detail_task is not None:
-                stop_reason = self._process_detail_task(detail_task)
-                if stop_reason is None:
-                    detail_pages_done += 1
-                    pages_since_flush += 1
-            else:
-                listing_task = self.repo.claim_listing_task(today)
-                if listing_task is None:
-                    stop_reason = StopReason.NO_MORE_DATA
+        try:
+            while stop_reason is None:
+                if detail_pages_done >= self.config.max_detail_pages_per_run:
+                    stop_reason = StopReason.MAX_PAGES
                     break
-                stop_reason = self._process_listing_task(listing_task, today)
 
-            if stop_reason is not None:
-                break
+                if self.clock.monotonic() - start_monotonic >= self.config.time_box_seconds:
+                    stop_reason = StopReason.TIME_BOX
+                    break
 
-            self._sleep_between_requests()
+                detail_task = self.repo.claim_detail_task()
 
-            if not early_flush_done and detail_pages_done >= self.config.min_success_pages:
-                # Flush sớm ngay khi đạt min_success_pages để bảo vệ dữ liệu nếu run dừng bất thường.
-                self.buffer.flush(run_id, today, final=False)
-                last_flush_monotonic = self.clock.monotonic()
-                pages_since_flush = 0
-                early_flush_done = True
-            else:
-                # Flush định kỳ theo interval/page threshold.
-                since_flush = self.clock.monotonic() - last_flush_monotonic
-                if (
-                    since_flush >= self.config.flush_interval_seconds
-                    or pages_since_flush >= self.config.flush_page_threshold
-                ):
-                    self.buffer.flush(run_id, today, final=False)
+                if detail_task is not None:
+                    stop_reason = self._process_detail_task(detail_task)
+                    if stop_reason is None:
+                        detail_pages_done += 1
+                        pages_since_flush += 1
+                        all_fetched_queue_ids.append(detail_task.queue_id)
+                else:
+                    listing_task = self.repo.claim_listing_task(today)
+                    if listing_task is None:
+                        stop_reason = StopReason.NO_MORE_DATA
+                        break
+                    stop_reason = self._process_listing_task(listing_task, today)
+
+                if stop_reason is not None:
+                    break
+
+                self._sleep_between_requests()
+
+                if not early_flush_done and detail_pages_done >= self.config.min_success_pages:
+                    # Flush sớm ngay khi đạt min_success_pages để bảo vệ dữ liệu nếu run dừng bất thường.
+                    self._flush_and_mark(
+                        run_id, today, all_fetched_queue_ids, detail_pages_done, final=False
+                    )
                     last_flush_monotonic = self.clock.monotonic()
                     pages_since_flush = 0
+                    early_flush_done = True
+                else:
+                    # Flush định kỳ theo interval/page threshold.
+                    since_flush = self.clock.monotonic() - last_flush_monotonic
+                    if (
+                        since_flush >= self.config.flush_interval_seconds
+                        or pages_since_flush >= self.config.flush_page_threshold
+                    ):
+                        self._flush_and_mark(
+                            run_id, today, all_fetched_queue_ids, detail_pages_done, final=False
+                        )
+                        last_flush_monotonic = self.clock.monotonic()
+                        pages_since_flush = 0
+        except Exception:
+            stop_reason = StopReason.CRASHED
+            raise
+        finally:
+            # Kết thúc run: flush cuối + mark done. Bọc riêng try/except để lỗi ở
+            # đây (VD S3 tạm thời lỗi) KHÔNG che mất exception gốc (nếu có) từ vòng lặp trên.
+            try:
+                output_key = self._flush_and_mark(
+                    run_id, today, all_fetched_queue_ids, detail_pages_done, final=True
+                )
+                self.repo.finalize_run_state(run_id, stop_reason, detail_pages_done, output_key)
+            except Exception:
+                logger.exception(
+                    "Lỗi khi flush/finalize trong finally — bỏ qua, không che exception gốc"
+                )
 
-        # Kết thúc run: flush cuối + rename. Luôn lưu toàn bộ trang đã crawl.
-        output_key = self.buffer.flush(run_id, today, final=True)
-        self.repo.finalize_run_state(run_id, stop_reason, detail_pages_done, output_key)
         return RunResult(stop_reason=stop_reason, detail_pages_done=detail_pages_done)
+
+    # -------- flush + mark status tương ứng --------
+
+    def _flush_and_mark(
+        self,
+        run_id: str,
+        crawl_date: date,
+        all_fetched_queue_ids: list[int],
+        detail_pages_done: int,
+        final: bool,
+    ) -> Optional[str]:
+        """Flush buffer lên S3. Chỉ khi flush thành công (key khác None):
+          - final=False -> mark 'flushed' (an toàn trên S3, chưa phải file final)
+          - final=True  -> mark 'done'    (đã trong file final, Silver đọc được)
+        Luôn mark TOÀN BỘ all_fetched_queue_ids (không chỉ batch mới), vì
+        buffer.flush() mỗi lần đều re-serialize toàn bộ buffer tích luỹ từ đầu run."""
+        output_key = self.buffer.flush(run_id, crawl_date, final=final)
+        if output_key is not None and all_fetched_queue_ids:
+            if final:
+                self.repo.mark_details_done(all_fetched_queue_ids)
+            else:
+                self.repo.mark_details_flushed(all_fetched_queue_ids)
+            self.repo.update_run_progress(run_id, detail_pages_done)
+        return output_key
+
+    # -------- Lớp 2: reconciliation cho run bị SIGKILL/OOM --------
+
+    def _reconcile_crashed_runs(self) -> None:
+        """Tìm các run_state có ended_at IS NULL và đã đủ cũ (chắc chắn chết,
+        không phải đang chạy). Với run đã đạt min_success_pages -> promote
+        .inprogress thành final + mark URL tương ứng 'done'. Ngược lại chỉ
+        đóng sổ (INCOMPLETE) để không bị quét lại vô hạn; dữ liệu (nếu có)
+        coi như mất, các dòng detail_queue liên quan sẽ tự về 'pending' qua
+        reclaim_stale_detail_queue() chạy ngay sau bước này."""
+        incomplete_runs = self.repo.list_incomplete_runs(
+            older_than_seconds=self.RECONCILE_STALE_RUN_AFTER_SECONDS
+        )
+        for incomplete in incomplete_runs:
+            crawl_date = incomplete.started_at.date()
+            promoted: Optional[PromotedFile] = None
+            if incomplete.detail_pages_done >= self.config.min_success_pages:
+                promoted = self.buffer.promote_inprogress_to_final(incomplete.run_id, crawl_date)
+
+            if promoted is not None:
+                self.repo.mark_urls_done(promoted.urls)
+                self.repo.finalize_run_state(
+                    incomplete.run_id, StopReason.RECOVERED,
+                    incomplete.detail_pages_done, promoted.final_key,
+                )
+                logger.info(
+                    "Reconciliation: khôi phục run_id=%s (%d trang, %d URL promote)",
+                    incomplete.run_id, incomplete.detail_pages_done, len(promoted.urls),
+                )
+            else:
+                # Không đủ điều kiện (hoặc không có gì để promote) -> đóng sổ
+                # INCOMPLETE, đồng thời dọn luôn .inprogress mồ côi (nếu có) vì
+                # run này sẽ không bao giờ được xét lại (đã finalize).
+                self.buffer.delete_inprogress(incomplete.run_id, crawl_date)
+                self.repo.finalize_run_state(
+                    incomplete.run_id, StopReason.INCOMPLETE,
+                    incomplete.detail_pages_done, None,
+                )
+                logger.warning(
+                    "Reconciliation: run_id=%s không đủ điều kiện khôi phục "
+                    "(%d trang < %d tối thiểu, hoặc không tìm thấy .inprogress) -> coi là mất, "
+                    "đã dọn .inprogress mồ côi (nếu có)",
+                    incomplete.run_id, incomplete.detail_pages_done, self.config.min_success_pages,
+                )
 
     # -------- xử lý 1 trang chi tiết --------
 
@@ -394,7 +601,10 @@ class WebCrawlerCore:
             html=result.html.encode("utf-8"),
         )
         self.buffer.add(record)
-        self.repo.mark_detail_done(task.queue_id)
+        # KHÔNG mark 'done' ở đây — dời sang _flush_and_mark(), chỉ mark 'done'
+        # SAU KHI dữ liệu đã flush thành công lên S3 (final). Ở đây chỉ đánh
+        # dấu 'fetched': đã có HTML nhưng còn chỉ nằm trong RAM.
+        self.repo.mark_detail_fetched(task.queue_id)
         return None
 
     # -------- xử lý 1 trang danh sách --------
@@ -422,7 +632,7 @@ class WebCrawlerCore:
     # -------- fetch dùng chung listing/detail, kèm retry (B4/B9-B12) --------
 
     def _fetch_with_retry(self, url: str) -> tuple[FetchResult, Optional[StopReason]]:
-        """Trả (result, stop_reason). 
+        """Trả (result, stop_reason).
         stop_reason=None nghĩa là fetch OK; khác None thì dừng run.
 
         Luật retry:

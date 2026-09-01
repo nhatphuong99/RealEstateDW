@@ -18,6 +18,14 @@ trigger tay khi cần.
 chạy xong mới DONE, nhờ đó `max_active_runs=1` tự ngăn 2 chu kỳ hourly
 chồng nhau. `deferrable=True` giải phóng worker slot trong lúc chờ (qua
 airflow-triggerer) — quan trọng vì Spark ở DAG 3 cũng cần slot riêng.
+
+KHÔI PHỤC RUN BỊ CRASH CỨNG (SIGKILL/OOM): mỗi lần `run_dag2()` chạy, TỰ
+ĐỘNG rà `pipeline.run_state` tìm run trước đó bị treo (`ended_at IS NULL`,
+`started_at` quá 2 giờ) — nếu đã crawl đủ `min_success_pages`, promote
+`.inprogress` của run đó thành file final + khôi phục `detail_queue`; nếu
+không đủ, đóng sổ (`INCOMPLETE`) và dọn `.inprogress` mồ côi tương ứng.
+Cơ chế này nằm trong `WebCrawlerCore._reconcile_crashed_runs()`
+(crawler/web_crawler_core.py), DAG này không cần biết/gọi gì thêm.
 """
 
 from __future__ import annotations
