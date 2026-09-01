@@ -35,7 +35,9 @@ from crawler.dataset_loader_core import (
     PartState,
     ProbeResult,
     UploadResult,
+    TOTAL_PARTS,          
     compute_parts_to_process,
+    is_fully_seeded,     
     process_one_part,
 )
 from crawler import config
@@ -240,6 +242,13 @@ def compute_parts_to_process_task() -> list[int]:
     cần xử lý, dùng trực tiếp làm input cho `.expand()` của Task 2."""
     with build_state_store_from_env() as store:
         states = store.list_states()
+
+    if not is_fully_seeded(states):
+        logger.warning(
+            "pipeline.dataset_part_state chỉ có %d/%d dòng — không khớp với thông tin dataset",
+            len(states), TOTAL_PARTS,
+        )
+
     existing_keys = list_existing_s3_keys(config.get_s3_bucket(), config.DATASET_S3_PREFIX)
     parts = compute_parts_to_process(states, existing_keys)
     logger.info(

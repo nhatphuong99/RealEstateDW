@@ -198,13 +198,15 @@ ORDER BY gia_tb_trieu_m2 DESC
 
 -- ----------------------------------------------------------------------------
 -- Card 9 — Xu hướng giá TB/m² theo tháng, theo loại hình BĐS (Line chart)
--- Cố ý KHÔNG có is_current = TRUE: dùng toàn bộ observation để dựng trục thời gian.
+-- is_current = TRUE bắt buộc: mỗi tin chỉ góp 1 dòng (version mới nhất biết được)
+-- vào bucket posted_date của nó, tránh 1 tin có nhiều version SCD2 bị đếm lặp.
 -- ----------------------------------------------------------------------------
 SELECT DATE_TRUNC('month', posted_date)::date AS thang,
        property_type_name,
        ROUND(AVG(price_per_m2_vnd) / 1000000.0, 2) AS gia_tb_trieu_m2
 FROM gold.vw_fact_report
-WHERE price_is_negotiable = FALSE
+WHERE is_current = TRUE
+  AND price_is_negotiable = FALSE
   AND price_is_outlier = FALSE
   AND area_is_outlier = FALSE
   AND area_is_undetermined = FALSE
@@ -219,12 +221,13 @@ ORDER BY 1
 
 -- ----------------------------------------------------------------------------
 -- Card 10 — Số lượng tin quan sát theo tháng (Bar chart)
--- Giữ nguyên 4 điều kiện lọc chuẩn để trục X khớp đúng tập dữ liệu ở Card 9.
+-- Cùng lý do: is_current = TRUE để khớp đúng tập dữ liệu với Card 9.
 -- ----------------------------------------------------------------------------
 SELECT DATE_TRUNC('month', posted_date)::date AS thang,
        COUNT(*) AS so_tin
 FROM gold.vw_fact_report
-WHERE price_is_negotiable = FALSE
+WHERE is_current = TRUE
+  AND price_is_negotiable = FALSE
   AND price_is_outlier = FALSE
   AND area_is_outlier = FALSE
   AND area_is_undetermined = FALSE

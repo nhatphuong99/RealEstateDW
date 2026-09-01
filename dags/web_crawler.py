@@ -55,7 +55,7 @@ with DAG(
     catchup=False,           # không chạy bù các giờ đã qua khi mới bật DAG
     max_active_runs=1,       # concurrency luôn = 1 — KHÔNG cho 2 run hourly chồng nhau
     default_args=default_args,
-    tags=["bronze", "crawler", "alonhadat", "dag2"],
+    tags=["bronze", "crawler", "web", "dag2"],
 ) as dag:
     crawl_web_detail_pages = PythonOperator(
         task_id="crawl_web_detail_pages",

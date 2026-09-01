@@ -89,19 +89,13 @@ SELECT
     f.has_warning,
     f.is_expired,
     f.is_current,
-    f.is_reconfirmed,
 
     -- Temporal
     f.valid_from,
     f.valid_to,
-    f.last_seen_at,
 
-    -- Dim_date (role-playing, join 2 lần)
-    dd_obs.full_date   AS observed_date,
-    dd_obs.year        AS observed_year,
-    dd_obs.month       AS observed_month,
-    dd_obs.quarter     AS observed_quarter,
-    dd_post.full_date  AS posted_date,
+    -- Dim_date
+    dd.full_date  AS posted_date,
 
     -- Dim_location — giữ nguyên bản gốc để audit/hiển thị
     dl.province_new,
@@ -139,8 +133,7 @@ SELECT
     dpf.owner_direct
 
 FROM gold.fact_listing_price f
-JOIN gold.dim_date dd_obs             ON dd_obs.date_key = f.observed_date_key
-JOIN gold.dim_date dd_post            ON dd_post.date_key = f.posted_date_key
+JOIN gold.dim_date dd            ON dd.date_key = f.posted_date_key
 JOIN gold.dim_location dl             ON dl.location_key = f.location_key
 JOIN gold.dim_property_type dpt       ON dpt.property_type_key = f.property_type_key
 JOIN gold.dim_source ds               ON ds.source_key = f.source_key

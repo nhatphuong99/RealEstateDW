@@ -79,6 +79,10 @@ def scan_and_fill_gaps(states: list[PartState]) -> list[int]:
     """A4 - part chưa xong (pending/failed)."""
     return [s.part_number for s in states if s.status in ("pending", "failed")]
 
+def is_fully_seeded(states: list[PartState]) -> bool:
+    """Kiểm tra pipeline.dataset_part_state đã seed đủ TOTAL_PARTS dòng chưa."""
+    return len(states) == TOTAL_PARTS
+
 def reconcile_missing_storage_objects(
     states: list[PartState], existing_s3_keys: set[str]
 ) -> list[int]:

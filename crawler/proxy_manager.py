@@ -44,7 +44,10 @@ GEONODE_HEADERS = {
 # 1. Fetch proxy thô từ 2 nguồn
 # ============================================================
 
-def fetch_from_proxyscrape(timeout: float = 15.0, limit: int = 500) -> list[str]:
+def fetch_from_proxyscrape(
+    timeout: float = config.PROXYSCRAPE_TIMEOUT_SECONDS,
+    limit: int = config.PROXYSCRAPE_LIMIT,
+) -> list[str]:
     """Lấy proxy từ ProxyScrape v4 (không cần API key).
     Trả về dạng "http://ip:port" — chỉ giữ proxy http://, loại bỏ socks4/socks5
     (vì API filter protocol=http không chuẩn tuyệt đối)."""
@@ -70,9 +73,12 @@ def fetch_from_proxyscrape(timeout: float = 15.0, limit: int = 500) -> list[str]
     return [line.strip() for line in lines if line.strip().lower().startswith("http://")]
 
 
-def fetch_from_geonode(timeout: float = 15.0, limit: int = 100) -> list[str]:
+def fetch_from_geonode(
+    timeout: float = config.GEONODE_TIMEOUT_SECONDS,
+    limit: int = config.GEONODE_LIMIT,
+) -> list[str]:
     """Lấy danh sách proxy HTTP từ GeoNode. BẮT BUỘC có header User-Agent
-    thật (xem GEONODE_HEADERS) — thiếu sẽ bị 403."""
+    thật — thiếu sẽ bị 403."""
     try:
         response = requests.get(
             GEONODE_URL,
@@ -111,10 +117,8 @@ def fetch_from_geonode(timeout: float = 15.0, limit: int = 100) -> list[str]:
 # 2. Health-check song song
 # ============================================================
 
-def health_check_one(proxy_url: str, timeout: float = 6.0) -> bool:
-    """Kiểm tra proxy còn sống và đủ nhanh.
-    Timeout ngắn (từ ProxyConfig) tự lọc chất lượng:
-    proxy quá tải/băng thông kém sẽ không trả lời kịp dù vẫn "sống"."""
+def health_check_one(proxy_url: str, timeout: float) -> bool:
+    """Kiểm tra proxy còn sống và đủ nhanh."""
     start = time.monotonic()
     try:
         response = requests.get(
@@ -132,12 +136,9 @@ def health_check_one(proxy_url: str, timeout: float = 6.0) -> bool:
 
 
 def health_check_parallel(
-    candidates: list[str], max_workers: int = 20, timeout: float = 6.0
+    candidates: list[str], max_workers: int, timeout: float
 ) -> list[str]:
-    """Health-check song song nhiều proxy.
-    Proxy free chết nhanh nên phải check ngay trước khi dùng,
-    không tin danh sách gốc từ ProxyScrape/GeoNode.
-    Trả về danh sách proxy còn sống."""
+    """Health-check song song nhiều proxy."""
 
     if not candidates:
         return []

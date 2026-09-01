@@ -25,8 +25,7 @@
 BEGIN;
 
 -- ----------------------------------------------------------------------
--- 1. DIM_DATE - lịch liên tục, phủ từ ngày nhỏ nhất đến lớn nhất trong
---    posted_date/valid_from/last_seen_at, để dashboard vẽ trend không đứt gãy.
+-- 1. DIM_DATE - lịch liên tục, phủ từ ngày nhỏ nhất đến lớn nhất trong posted_date
 -- ----------------------------------------------------------------------
 INSERT INTO gold.dim_date (date_key, full_date, day, month, quarter, year)
 SELECT
@@ -37,8 +36,8 @@ SELECT
     EXTRACT(QUARTER FROM d)::SMALLINT,
     EXTRACT(YEAR FROM d)::SMALLINT
 FROM generate_series(
-    (SELECT LEAST(MIN(posted_date), MIN(valid_from::DATE)) FROM silver.listing_history),
-    (SELECT GREATEST(MAX(posted_date), MAX(valid_from::DATE), MAX(last_seen_at::DATE)) FROM silver.listing_history),
+    (SELECT MIN(posted_date) FROM silver.listing_history),
+    (SELECT MAX(posted_date) FROM silver.listing_history),
     INTERVAL '1 day'
 ) AS d
 ON CONFLICT (date_key) DO NOTHING;
@@ -112,8 +111,8 @@ ON CONFLICT (feature_key) DO NOTHING;
 INSERT INTO gold.fact_listing_price (
     listing_key, listing_id, listing_url,
     location_key, property_type_key, feature_key, source_key,
-    observed_date_key, posted_date_key,
-    valid_from, valid_to, last_seen_at, is_current,
+    posted_date_key,
+    valid_from, valid_to, is_current,
     price_vnd, price_per_m2_vnd, area_m2,
     bedrooms, floors, length_m, width_m, street_width_m,
     price_is_negotiable, price_is_outlier, area_is_undetermined, area_is_outlier,
@@ -130,11 +129,9 @@ SELECT
         h.has_rooftop, h.has_car_parking, h.owner_direct
     ) AS feature_key,
     src.source_key,
-    TO_CHAR(h.valid_from::DATE, 'YYYYMMDD')::INTEGER AS observed_date_key,
     TO_CHAR(h.posted_date, 'YYYYMMDD')::INTEGER AS posted_date_key,
     h.valid_from,
     h.valid_to,
-    h.last_seen_at,
     h.is_current,
     h.price_vnd,
     h.price_per_m2_vnd,
@@ -175,11 +172,9 @@ ON CONFLICT (listing_key) DO UPDATE SET
     property_type_key           = EXCLUDED.property_type_key,
     feature_key                  = EXCLUDED.feature_key,
     source_key                   = EXCLUDED.source_key,
-    observed_date_key              = EXCLUDED.observed_date_key,
     posted_date_key                = EXCLUDED.posted_date_key,
     valid_from                       = EXCLUDED.valid_from,
     valid_to                          = EXCLUDED.valid_to,
-    last_seen_at                       = EXCLUDED.last_seen_at,
     is_current                          = EXCLUDED.is_current,
     price_vnd                            = EXCLUDED.price_vnd,
     price_per_m2_vnd                      = EXCLUDED.price_per_m2_vnd,

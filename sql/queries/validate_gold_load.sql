@@ -38,20 +38,7 @@ check_current_uniqueness AS (
         HAVING COUNT(*) > 1
     ) dup
 ),
-check_reconfirmation_visibility AS (
-    -- Thông tin (không phải lỗi) — tỉ lệ dòng is_reconfirmed=TRUE (crawl lại
-    -- ≥2 lần), phản ánh giới hạn độ phủ crawler. Luôn passed=TRUE, chỉ để log.
-    SELECT
-        'reconfirmed_ratio_info' AS check_name,
-        'n/a (informational)' AS expected,
-        ROUND(100.0 * COUNT(*) FILTER (WHERE is_reconfirmed) / NULLIF(COUNT(*), 0), 2)::TEXT || '%' AS actual,
-        TRUE AS passed
-    FROM gold.fact_listing_price
-),
 check_fk_not_null AS (
-    -- Cột FK đã NOT NULL ở DDL nên về lý thuyết không thể NULL (insert
-    -- sẽ tự fail sớm hơn) -- check này chỉ để có thông điệp rõ ràng thay
-    -- vì lỗi constraint chung chung, hữu ích khi debug qua log.
     SELECT
         'fact_fk_not_null' AS check_name,
         '0' AS expected,
@@ -62,7 +49,6 @@ check_fk_not_null AS (
        OR property_type_key IS NULL
        OR feature_key IS NULL
        OR source_key IS NULL
-       OR observed_date_key IS NULL
        OR posted_date_key IS NULL
 ),
 check_price_per_m2_flagged AS (
@@ -96,8 +82,6 @@ check_area_within_sanitized_bounds AS (
 SELECT * FROM check_row_count
 UNION ALL
 SELECT * FROM check_current_uniqueness
-UNION ALL
-SELECT * FROM check_reconfirmation_visibility
 UNION ALL
 SELECT * FROM check_fk_not_null
 UNION ALL

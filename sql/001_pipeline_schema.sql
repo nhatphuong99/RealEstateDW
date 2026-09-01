@@ -9,13 +9,14 @@ CREATE SCHEMA IF NOT EXISTS pipeline;
 -- 1. Con trỏ crawl trang danh sách (listing_progress)
 CREATE TABLE IF NOT EXISTS pipeline.listing_progress (
     id              SERIAL PRIMARY KEY,
+    province_old    TEXT NOT NULL,          -- ho-chi-minh / ba-ria-vung-tau / binh-duong
     listing_type    TEXT NOT NULL,          -- can-ban / cho-thue
     property_type   TEXT NOT NULL,          -- 5 loại BĐS
     current_page    INT NOT NULL DEFAULT 1, -- trang tiếp theo
     status          TEXT NOT NULL DEFAULT 'active', -- active / exhausted
     crawl_date      DATE NOT NULL,          -- reset mỗi ngày
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (listing_type, property_type, crawl_date)
+    UNIQUE (province_old, listing_type, property_type, crawl_date)
 );
 
 -- 2. Hàng đợi URL chi tiết (detail_queue)

@@ -3,19 +3,13 @@
 -- Star Schema Kimball — Fact loại Transaction/Observation-grain.
 --
 -- Grain fact_listing_price: 1 dòng = 1 version giá đã quan sát được, khớp
--- 1:1 với silver.listing_history (KHÔNG fan-out theo ngày kiểu Periodic
--- Snapshot). Lý do: crawler chỉ enqueue mỗi URL 1 lần (UNIQUE(url)), không
--- có đủ bằng chứng để suy diễn "còn active vào ngày X" cho mọi ngày giữa
--- 2 lần crawl — Periodic Snapshot sẽ buộc phải nội suy sai thực tế.
--- Chi tiết: xem kien_truc_tong_hop_he_thong.md mục "Vì sao Transaction/
--- Observation-grain".
+-- 1:1 với silver.listing_history.
 -- ============================================================================
 
 CREATE SCHEMA IF NOT EXISTS gold;
 
 -- ----------------------------------------------------------------------------
--- DIM_DATE — Type 0. Role-playing: observed_date_key (thuộc grain Fact —
--- ngày quan sát) và posted_date_key (thông tin phụ) cùng trỏ bảng này.
+-- DIM_DATE — Type 0. 
 -- ----------------------------------------------------------------------------
 CREATE TABLE gold.dim_date (
     date_key      INTEGER      PRIMARY KEY,   -- Format YYYYMMDD.
@@ -27,8 +21,7 @@ CREATE TABLE gold.dim_date (
 );
 
 COMMENT ON TABLE gold.dim_date IS
-    'Bảng ngày chuẩn Kimball, Type 0. Role-playing: observed_date_key (thuộc grain Fact, '
-    '= valid_from::date) và posted_date_key (thông tin phụ). Tầng BI tự alias khi JOIN 2 lần.';
+    'Bảng ngày chuẩn Kimball, Type 0.';
 
 -- ----------------------------------------------------------------------------
 -- DIM_LOCATION — Type 1 (không SCD2, vì đổi địa chỉ giữa các version Silver
@@ -51,8 +44,7 @@ CREATE TABLE gold.dim_location (
 );
 
 COMMENT ON TABLE gold.dim_location IS
-    'Địa điểm, Type 1. GROUP BY ward_new cho phân tích theo địa giới mới; '
-    'filter ward_old/district_old/province_old cho người dùng quen địa chỉ cũ.';
+    'Địa điểm, SCD Type 1.';
 COMMENT ON COLUMN gold.dim_location.province_old IS
     'Tỉnh/thành trước sáp nhập — KHÔNG dùng để lọc scope (is_in_scope() chỉ dùng province_new).';
 
@@ -152,19 +144,12 @@ CREATE TABLE gold.fact_listing_price (
     feature_key           CHAR(32) NOT NULL REFERENCES gold.dim_property_features (feature_key),
     source_key             BIGINT   NOT NULL REFERENCES gold.dim_source (source_key),
 
-    -- Role-playing date: observed_date_key dùng cho mọi phân tích xu hướng
-    -- (nên bucket theo tuần/tháng — mật độ quan sát thưa/không đều).
-    observed_date_key           INTEGER NOT NULL REFERENCES gold.dim_date (date_key),
-    posted_date_key               INTEGER NOT NULL REFERENCES gold.dim_date (date_key),
+    posted_date_key    INTEGER      NOT NULL REFERENCES gold.dim_date (date_key),
 
-    -- Temporal metadata
-    valid_from        TIMESTAMPTZ  NOT NULL,   -- = thời điểm quan sát đầu tiên (crawl_date).
-    valid_to          TIMESTAMPTZ,             -- NULL ở đa số dòng — xem COMMENT cột.
-    last_seen_at      TIMESTAMPTZ  NOT NULL,   -- Lần xác nhận gần nhất (có thể = valid_from).
+    -- Temporal metadata — chỉ phục vụ lineage/audit (VD: dòng này ETL từ version Silver nào)
+    valid_from        TIMESTAMPTZ  NOT NULL,
+    valid_to          TIMESTAMPTZ,           
     is_current        BOOLEAN      NOT NULL,
-
-    -- Cờ chất lượng quan sát
-    is_reconfirmed    BOOLEAN GENERATED ALWAYS AS (last_seen_at > valid_from) STORED,
 
     -- Measure chính
     price_vnd            NUMERIC(16, 0),              -- Nullable: NULL khi price_is_negotiable=TRUE.
@@ -198,25 +183,12 @@ COMMENT ON COLUMN gold.fact_listing_price.price_is_outlier IS
     'price_vnd không bị null hóa — lọc bằng cờ này khi tính AVG/dashboard.';
 COMMENT ON COLUMN gold.fact_listing_price.area_is_outlier IS
     'Mirror silver.listing_history.area_is_outlier (area_m2 gốc >10.000m2 hoặc <3m2, đã null hóa ở Silver).';
-COMMENT ON COLUMN gold.fact_listing_price.valid_to IS
-    'NULL ở đa số dòng — nghĩa "chưa từng crawl lại lần 2 để xác nhận thay đổi", '
-    'KHÔNG có nghĩa "tin vẫn đang active". Không suy diễn "còn hiệu lực tới hiện tại" từ NULL này.';
-COMMENT ON COLUMN gold.fact_listing_price.is_current IS
-    'Nghĩa chính xác: "chưa từng phát hiện version mới hơn thay thế" — KHÔNG đảm bảo tin vẫn '
-    'tồn tại trên site thật, vì phần lớn chưa từng được crawl lại để kiểm chứng.';
-COMMENT ON COLUMN gold.fact_listing_price.is_reconfirmed IS
-    'TRUE khi listing có ≥2 lần quan sát (last_seen_at > valid_from) — có bằng chứng xác nhận '
-    'thực tế, không chỉ suy từ 1 lần crawl. Dùng lọc độ tin cậy cao hoặc KPI "% dữ liệu kiểm chứng lại".';
-COMMENT ON COLUMN gold.fact_listing_price.observed_date_key IS
-    'Ngày quan sát đầu tiên (= valid_from::date). Trục thời gian chính cho phân tích xu hướng — '
-    'nên GROUP BY theo tuần/tháng, không theo ngày (mật độ quan sát thưa, không đều).';
 COMMENT ON COLUMN gold.fact_listing_price.posted_date_key IS
-    'Ngày đăng tin (site tự ghi nhận) — thông tin phụ, không dùng làm trục phân tích chính.';
+    'Ngày đăng tin (site tự ghi nhận).';
 
 -- Index phục vụ truy vấn chính: giá theo Phường-Xã/Loại hình/Thời gian
 CREATE INDEX idx_fact_location            ON gold.fact_listing_price (location_key);
 CREATE INDEX idx_fact_property_type       ON gold.fact_listing_price (property_type_key);
-CREATE INDEX idx_fact_observed_date       ON gold.fact_listing_price (observed_date_key);
 CREATE INDEX idx_fact_posted_date         ON gold.fact_listing_price (posted_date_key);
 CREATE INDEX idx_fact_listing_id          ON gold.fact_listing_price (listing_id);
 CREATE INDEX idx_fact_current             ON gold.fact_listing_price (is_current) WHERE is_current;

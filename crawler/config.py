@@ -52,11 +52,15 @@ PROXY_HEALTH_CHECK_TIMEOUT_SECONDS = _float("PROXY_HEALTH_CHECK_TIMEOUT_SECONDS"
 PROXY_HEALTH_CHECK_WORKERS = _int("PROXY_HEALTH_CHECK_WORKERS", 20)
 PROXY_MAX_CANDIDATES = _int("PROXY_MAX_CANDIDATES", 200)
 
+# Tham số riêng cho bước lấy danh sách proxy thô, tách khỏi timeout cho health-check ở trên.
+PROXYSCRAPE_TIMEOUT_SECONDS = _float("PROXYSCRAPE_TIMEOUT_SECONDS", 15.0)
+PROXYSCRAPE_LIMIT = _int("PROXYSCRAPE_LIMIT", 500)
+GEONODE_TIMEOUT_SECONDS = _float("GEONODE_TIMEOUT_SECONDS", 15.0)
+GEONODE_LIMIT = _int("GEONODE_LIMIT", 100)
+
 # Crawl loop (Nhóm B, DAG 2)
 WEB_CRAWLER_MAX_DETAIL_PAGES_PER_RUN = _int("WEB_CRAWLER_MAX_DETAIL_PAGES_PER_RUN", 1000)
-# 40 phút — chừa buffer ~20 phút cho DAG 3+4 chạy xong trong cùng giờ (DAG 2
-# @hourly tự trigger tiếp DAG 3->4). Theo dõi log [TIMING] thực tế để tinh
-# chỉnh lại nếu backlog dồn nhiều file Bronze sau downtime.
+# 45 phút — chừa buffer ~20 phút cho DAG 3+4 chạy xong trong cùng giờ (DAG 2 @hourly tự trigger tiếp DAG 3->4).
 WEB_CRAWLER_TIME_BOX_SECONDS = _int("WEB_CRAWLER_TIME_BOX_SECONDS", 45 * 60)
 WEB_CRAWLER_DELAY_MIN_SECONDS = _float("WEB_CRAWLER_DELAY_MIN_SECONDS", 5.0)
 WEB_CRAWLER_DELAY_MAX_SECONDS = _float("WEB_CRAWLER_DELAY_MAX_SECONDS", 10.0)

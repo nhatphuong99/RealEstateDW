@@ -58,16 +58,20 @@ PROPERTY_TYPES: tuple[str, ...] = (
     "phong-tro-nha-tro",
 )
 
+PROVINCES: tuple[str, ...] = ("ho-chi-minh", "binh-duong", "ba-ria-vung-tau")
+# Địa phận CŨ dùng để build URL nguồn web (site chưa cập nhật theo
+# địa giới mới). Sau sáp nhập, Bình Dương + Bà Rịa Vũng Tàu thuộc TP.HCM
+
 # Các cụm từ để dò CAPTCHA (site trả HTTP 200 kèm trang xác minh, không có status riêng — B9).
 CAPTCHA_MARKERS: tuple[str, ...] = (
     "Tôi không phải người máy",
 )
 
 
-def all_listing_combinations() -> list[tuple[str, str]]:
-    """Sinh 10 tổ hợp (listing_type, property_type) cố định — dùng khi seed
+def all_listing_combinations() -> list[tuple[str, str, str]]:
+    """Sinh 30 tổ hợp (province_old, listing_type, property_type) cố định — dùng khi seed
     hoặc daily-reset bảng listing_progress."""
-    return [(lt, pt) for lt in LISTING_TYPES for pt in PROPERTY_TYPES]
+    return [(pv, lt, pt) for pv in PROVINCES for lt in LISTING_TYPES for pt in PROPERTY_TYPES]
 
 
 # ============================================================
@@ -149,6 +153,7 @@ class ListingTask:
     """1 tổ hợp listing_progress đã được claim."""
 
     progress_id: int
+    province_old: str
     listing_type: str
     property_type: str
     page_to_crawl: int
@@ -206,9 +211,9 @@ class IncompleteRun:
 # 3. Hàm thuần (pure function) — parse HTML, không I/O thật
 # ============================================================
 
-def compute_listing_page_url(listing_type: str, property_type: str, page: int) -> str:
-    """Tính URL trang danh sách bằng số học (B6), không dùng link phân trang."""
-    base = f"{BASE_URL}/{listing_type}-{property_type}/ho-chi-minh"
+def compute_listing_page_url(province_old: str, listing_type: str, property_type: str, page: int) -> str:
+    """Tính URL trang danh sách bằng số học, không dùng link phân trang."""
+    base = f"{BASE_URL}/{listing_type}-{property_type}/{province_old}"
     return base if page <= 1 else f"{base}/trang-{page}"
 
 
@@ -613,7 +618,7 @@ class WebCrawlerCore:
         self, task: ListingTask, crawl_date: date
     ) -> Optional[StopReason]:
         page_url = compute_listing_page_url(
-            task.listing_type, task.property_type, task.page_to_crawl
+            task.province_old, task.listing_type, task.property_type, task.page_to_crawl
         )
         result, stop_reason = self._fetch_with_retry(page_url)
 

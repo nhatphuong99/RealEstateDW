@@ -46,6 +46,9 @@ from crawler.web_crawler_core import (
     PromotedFile,
     RunResult,
     StopReason,
+    PROVINCES,       
+    LISTING_TYPES,     
+    PROPERTY_TYPES, 
 )
 from crawler import config
 from crawler.proxy_manager import ProxyPool
@@ -89,15 +92,6 @@ class SystemClock:
 # 2. Control-plane repo (psycopg2) — pipeline.listing_progress / detail_queue / run_state
 # ============================================================
 
-LISTING_TYPES = ("can-ban", "cho-thue")
-PROPERTY_TYPES = (
-    "nha-mat-tien",
-    "nha-trong-hem",
-    "biet-thu-nha-lien-ke",
-    "can-ho-chung-cu",
-    "phong-tro-nha-tro",
-)
-
 # Ngưỡng "coi như run đã chết" — dùng CHUNG cho reclaim_stale_detail_queue()
 # (bên dưới) và WebCrawlerCore.RECONCILE_STALE_RUN_AFTER_SECONDS (core.py).
 # 2 giờ (thay vì đúng 1 chu kỳ lịch hourly) để chừa dư buffer cho: (a) Celery/
@@ -139,21 +133,23 @@ class PsycopgControlPlaneRepo:
     # -------- daily reset & reclaim --------
 
     def apply_daily_reset_if_needed(self, today: date) -> None:
-        """INSERT 10 tổ hợp mới cho `today` nếu chưa có (giữ nguyên ngày cũ).
-        UNIQUE + ON CONFLICT DO NOTHING đảm bảo idempotent khi gọi nhiều lần."""
+        """INSERT 30 tổ hợp mới (3 tỉnh/thành x 2 loại tin x 5 loại BĐS) cho `today`
+        nếu chưa có (giữ nguyên ngày cũ). UNIQUE + ON CONFLICT DO NOTHING đảm bảo
+        idempotent khi gọi nhiều lần."""
         rows = [
-            (lt, pt, today) for lt in LISTING_TYPES for pt in PROPERTY_TYPES
+            (pv, lt, pt, today)
+            for pv in PROVINCES for lt in LISTING_TYPES for pt in PROPERTY_TYPES
         ]
         with self._cursor() as cur:
             psycopg2.extras.execute_values(
                 cur,
                 """
                 INSERT INTO pipeline.listing_progress
-                    (listing_type, property_type, current_page, status, crawl_date)
+                    (province_old, listing_type, property_type, current_page, status, crawl_date)
                 VALUES %s
-                ON CONFLICT (listing_type, property_type, crawl_date) DO NOTHING
+                ON CONFLICT (province_old, listing_type, property_type, crawl_date) DO NOTHING
                 """,
-                [(lt, pt, 1, "active", cd) for lt, pt, cd in rows],
+                [(pv, lt, pt, 1, "active", cd) for pv, lt, pt, cd in rows],
             )
 
     def reclaim_stale_detail_queue(self) -> int:
@@ -190,7 +186,7 @@ class PsycopgControlPlaneRepo:
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
                 )
-                RETURNING id, listing_type, property_type, current_page - 1 AS page_to_crawl
+                RETURNING id, province_old, listing_type, property_type, current_page - 1 AS page_to_crawl
                 """,
                 (crawl_date,),
             )
@@ -199,6 +195,7 @@ class PsycopgControlPlaneRepo:
                 return None
             return ListingTask(
                 progress_id=row["id"],
+                province_old=row["province_old"],
                 listing_type=row["listing_type"],
                 property_type=row["property_type"],
                 page_to_crawl=row["page_to_crawl"],
@@ -699,7 +696,7 @@ def run_dag2(run_id: Optional[str] = None) -> str:
     if result.stop_reason not in NORMAL_STOP_REASONS:
         logger.info(
             "DAG2 run_id=%s: stop_reason bất thường (%s) nhưng đã crawl đủ "
-            "%d trang (>= %d) -> VẪN TÍNH LÀ THÀNH CÔNG.",
+            "%d trang (>= %d) -> THÀNH CÔNG.",
             run_id, result.stop_reason.value, result.detail_pages_done,
             config.WEB_CRAWLER_MIN_SUCCESS_PAGES,
         )
