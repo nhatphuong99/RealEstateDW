@@ -121,7 +121,7 @@ WHERE h.listing_id = cp.listing_id
 -- KHÔNG insert row_hash (GENERATED STORED, Postgres tự tính).
 -- ----------------------------------------------------------------------
 INSERT INTO silver.listing_history (
-    listing_id, listing_url, source_part, source_bronze_key, crawl_date,
+    listing_id, listing_url, source_part, source_bronze_key,
     valid_from, valid_to, is_current, last_seen_at,
     title, listing_type, property_type, posted_date,
     price_vnd, price_raw, price_is_negotiable, price_is_outlier,
@@ -134,7 +134,7 @@ INSERT INTO silver.listing_history (
     address_old_raw, address_ward_old, address_district_old, address_province_old
 )
 SELECT
-    listing_id, listing_url, source_part, source_bronze_key, crawl_date,
+    listing_id, listing_url, source_part, source_bronze_key,
     crawl_date AS valid_from,
     next_change_crawl_date AS valid_to,
     is_latest AS is_current,

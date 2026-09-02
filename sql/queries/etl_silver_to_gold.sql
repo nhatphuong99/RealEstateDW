@@ -27,14 +27,10 @@ BEGIN;
 -- ----------------------------------------------------------------------
 -- 1. DIM_DATE - lịch liên tục, phủ từ ngày nhỏ nhất đến lớn nhất trong posted_date
 -- ----------------------------------------------------------------------
-INSERT INTO gold.dim_date (date_key, full_date, day, month, quarter, year)
+INSERT INTO gold.dim_date (date_key, full_date)
 SELECT
     TO_CHAR(d, 'YYYYMMDD')::INTEGER,
-    d,
-    EXTRACT(DAY FROM d)::SMALLINT,
-    EXTRACT(MONTH FROM d)::SMALLINT,
-    EXTRACT(QUARTER FROM d)::SMALLINT,
-    EXTRACT(YEAR FROM d)::SMALLINT
+    d
 FROM generate_series(
     (SELECT MIN(posted_date) FROM silver.listing_history),
     (SELECT MAX(posted_date) FROM silver.listing_history),
