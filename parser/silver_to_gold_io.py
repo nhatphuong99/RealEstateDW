@@ -1,12 +1,12 @@
 """
 parser/silver_to_gold_io.py
 
-Orchestration cho ETL Silver -> Gold (DAG 4). File Python DUY NHẤT của
-Gold ETL — KHÔNG chứa business logic, toàn bộ logic nằm trong 2 file SQL
-(sql/queries/etl_silver_to_gold.sql, sql/queries/validate_gold_load.sql).
+Thành phần 4 (ETL Silver -> Gold) — orchestration, file Python duy nhất
+của Gold ETL. Toàn bộ logic nằm trong 2 file SQL:
+sql/queries/etl_silver_to_gold.sql, sql/queries/validate_gold_load.sql.
 
 Không có silver_to_gold_core.py: Silver và Gold cùng 1 Postgres, transform
-làm thẳng bằng SQL thay vì kéo dữ liệu ra Spark/Python.
+thẳng bằng SQL thay vì kéo dữ liệu ra Spark/Python.
 """
 
 from __future__ import annotations
@@ -27,17 +27,12 @@ _VALIDATE_SQL_PATH = _PROJECT_ROOT / "sql" / "queries" / "validate_gold_load.sql
 
 
 def run_etl_silver_to_gold() -> None:
-    """Task entrypoint duy nhất cho PythonOperator.
+    """Bước 1-2 — chạy nguyên văn etl_silver_to_gold.sql (đã tự bọc
+    BEGIN;...COMMIT;), nên conn phải autocommit=True để không lồng transaction.
 
-    Chạy nguyên văn etl_silver_to_gold.sql — file đã tự bọc BEGIN;...COMMIT;
-    nên conn PHẢI autocommit=True để không lồng transaction (giống
-    _run_scd2_merge() trong bronze_file_state_io.py).
-
-    Không có control-plane riêng: 1 transaction full-refresh idempotent duy
-    nhất — lỗi ở bất kỳ bước nào trong 6 bước sẽ ROLLBACK toàn bộ (nguyên tử).
-    Nếu row_count_match FAIL actual=0, khả năng cao là 1 bước lỗi cứng
-    (schema-drift...) làm rollback cả batch — chạy diagnose_gold_join_loss.sql
-    để xác định chính xác.
+    1 transaction full-refresh idempotent duy nhất — lỗi ở bất kỳ bước nào
+    sẽ rollback toàn bộ. Nếu row_count_match FAIL actual=0, chạy
+    diagnose_gold_join_loss.sql để xác định chính xác nguyên nhân.
     """
     t0 = time.perf_counter()
     sql_text = _ETL_SQL_PATH.read_text(encoding="utf-8")
@@ -55,13 +50,11 @@ def run_etl_silver_to_gold() -> None:
 
 
 def validate_gold_load() -> None:
-    """Chạy validate_gold_load.sql (6 check: row_count_match,
-    is_current_unique_per_listing, reconfirmed_ratio_info [chỉ thông tin,
-    luôn pass], fact_fk_not_null, price_per_m2_extreme_all_flagged,
-    area_within_sanitized_bounds), raise RuntimeError liệt kê rõ check nào
-    passed=FALSE — để Airflow đánh dấu task fail thay vì âm thầm pass khi
-    dữ liệu Gold sai lệch. Gọi SAU run_etl_silver_to_gold() trong DAG
-    (task 2, nối tiếp bằng >>).
+    """Bước 3 — chạy validate_gold_load.sql (5 check: row_count_match,
+    is_current_unique_per_listing, fact_fk_not_null,
+    price_per_m2_extreme_all_flagged, area_within_sanitized_bounds), raise
+    RuntimeError liệt kê rõ check nào fail — để Airflow đánh dấu task fail
+    thay vì âm thầm pass khi dữ liệu Gold sai lệch.
     """
     sql_text = _VALIDATE_SQL_PATH.read_text(encoding="utf-8")
 

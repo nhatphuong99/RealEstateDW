@@ -1,19 +1,15 @@
 """
 crawler/web_crawler_io.py
 
-Implement các Protocol từ web_crawler_core.py:
-    - PsycopgControlPlaneRepo -> Postgres (pipeline.listing_progress / detail_queue / run_state)
+Thành phần 2 (Web Crawler) — implement các Protocol từ web_crawler_core.py:
+    - PsycopgControlPlaneRepo -> Postgres (pipeline.listing_progress/detail_queue/run_state)
     - RequestsPageFetcher     -> HTTP GET qua proxy
     - S3ParquetBufferWriter   -> buffer + flush S3 (boto3 + pyarrow)
     - SystemClock             -> thời gian thật (Asia/Ho_Chi_Minh)
     - run_dag2()              -> hàm wiring duy nhất gọi từ dags/web_crawler.py
 
 Core không import psycopg2/boto3/requests — chỉ module này xử lý I/O thật.
-
-Proxy: dùng `proxy_manager.ProxyPool` (đúng Protocol ProxyPool). `SimpleProxyPool` đã bị xoá.
-
-Cấu hình: đọc từ crawler/config.py (timeout, DSN, bucket...). 
-Không tự đọc os.environ rải rác (trừ run_dag2 nhận run_id).
+Cấu hình đọc từ crawler/config.py, không tự đọc os.environ rải rác.
 """
 
 
@@ -57,7 +53,7 @@ logger = logging.getLogger("web_crawler_io")
 
 HCM_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
-# User-Agent xoay vòng đơn giản — giảm rủi ro bị nhận diện bot qua header cố định.
+# User-Agent xoay vòng — giảm rủi ro bị nhận diện bot qua header cố định.
 USER_AGENTS: tuple[str, ...] = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -70,13 +66,12 @@ USER_AGENTS: tuple[str, ...] = (
 
 
 # ============================================================
-# 1. Clock thật
+# Clock thật
 # ============================================================
 
 class SystemClock:
-    """Implement Protocol Clock bằng thời gian hệ thống thật, quy đổi về
-    múi giờ Asia/Ho_Chi_Minh (crawl_date/daily-reset phải theo ngày lịch
-    HCMC, không phải ngày UTC)."""
+    """Clock thật, quy đổi về Asia/Ho_Chi_Minh (crawl_date/daily-reset theo
+    ngày lịch HCMC, không phải ngày UTC)."""
 
     def now(self) -> datetime:
         return datetime.now(HCM_TZ)
@@ -89,16 +84,12 @@ class SystemClock:
 
 
 # ============================================================
-# 2. Control-plane repo (psycopg2) — pipeline.listing_progress / detail_queue / run_state
+# Bước 1: Control-plane repo (psycopg2)
 # ============================================================
 
-# Ngưỡng "coi như run đã chết" — dùng CHUNG cho reclaim_stale_detail_queue()
-# (bên dưới) và WebCrawlerCore.RECONCILE_STALE_RUN_AFTER_SECONDS (core.py).
-# 2 giờ (thay vì đúng 1 chu kỳ lịch hourly) để chừa dư buffer cho: (a) Celery/
-# Redis redeliver task khiến Airflow báo FAILED dù process cũ vẫn đang chạy
-# ngầm (xem error_log.md — task "pause" ~1 giờ rồi tự resume), (b) run đang
-# retry/đổi proxy kéo dài hợp lệ (_fetch_with_retry không bị time_box chặn
-# giữa các lần retry). Tránh reclaim/reconcile oan 1 run vẫn đang thực sự sống.
+# Ngưỡng "coi như run đã chết" — dùng chung cho reclaim_stale_detail_queue()
+# và WebCrawlerCore.RECONCILE_STALE_RUN_AFTER_SECONDS (core.py). 2 giờ để
+# chừa dư buffer cho run đang retry/đổi proxy kéo dài hợp lệ.
 STALE_RUN_THRESHOLD_SQL = "2 hours"
 
 
@@ -108,11 +99,9 @@ def _sanitize_run_id_for_key(run_id: str) -> str:
 
 
 class PsycopgControlPlaneRepo:
-    """Implement ControlPlaneRepo bằng psycopg2, thao tác schema `pipeline` trong `postgres-dw`.
-
-    Dùng autocommit=True: mỗi method là 1 statement SQL độc lập 
-    (kể cả UPDATE...RETURNING với FOR UPDATE SKIP LOCKED), 
-    nên không cần quản lý transaction thủ công."""
+    """Implement ControlPlaneRepo bằng psycopg2, thao tác schema `pipeline`.
+    autocommit=True — mỗi method là 1 statement độc lập (kể cả UPDATE...RETURNING
+    với FOR UPDATE SKIP LOCKED), không cần quản lý transaction thủ công."""
 
     def __init__(self, dsn: str) -> None:
         self._conn = psycopg2.connect(dsn)
@@ -133,9 +122,8 @@ class PsycopgControlPlaneRepo:
     # -------- daily reset & reclaim --------
 
     def apply_daily_reset_if_needed(self, today: date) -> None:
-        """INSERT 30 tổ hợp mới (3 tỉnh/thành x 2 loại tin x 5 loại BĐS) cho `today`
-        nếu chưa có (giữ nguyên ngày cũ). UNIQUE + ON CONFLICT DO NOTHING đảm bảo
-        idempotent khi gọi nhiều lần."""
+        """INSERT 30 tổ hợp mới cho `today` nếu chưa có. UNIQUE + ON CONFLICT
+        DO NOTHING đảm bảo idempotent khi gọi nhiều lần."""
         rows = [
             (pv, lt, pt, today)
             for pv in PROVINCES for lt in LISTING_TYPES for pt in PROPERTY_TYPES
@@ -153,10 +141,8 @@ class PsycopgControlPlaneRepo:
             )
 
     def reclaim_stale_detail_queue(self) -> int:
-        """Reset các dòng 'processing'/'fetched'/'flushed' còn treo quá
-        STALE_RUN_THRESHOLD_SQL (2 giờ) về 'pending', giữ nguyên `discovered_at`.
-        Áp cho cả 3 trạng thái trung gian vì dữ liệu của chúng chỉ nằm trong
-        RAM/.inprogress của 1 process có thể đã chết — mức độ rủi ro như nhau."""
+        """Reset dòng 'processing'/'fetched'/'flushed' treo quá
+        STALE_RUN_THRESHOLD_SQL về 'pending', giữ nguyên discovered_at."""
         with self._cursor() as cur:
             cur.execute(
                 f"""
@@ -172,8 +158,7 @@ class PsycopgControlPlaneRepo:
     # -------- listing_progress --------
 
     def claim_listing_task(self, crawl_date: date) -> Optional[ListingTask]:
-        """Claim tổ hợp `active` có `current_page` nhỏ nhất (tie-break id
-        ASC) — nguyên văn claim pattern đã thống nhất (mục 5)."""
+        """Claim tổ hợp `active` có current_page nhỏ nhất (tie-break id ASC)."""
         with self._cursor() as cur:
             cur.execute(
                 """
@@ -217,8 +202,7 @@ class PsycopgControlPlaneRepo:
     def enqueue_detail_urls(
         self, urls: Sequence[str], discovered_page_id: int, crawl_date: date
     ) -> None:
-        """INSERT hàng loạt, dedup bằng UNIQUE(url) + ON CONFLICT DO NOTHING.
-        Danh sách rỗng thì bỏ qua (trang liệt kê có thể không có tin mới)."""
+        """INSERT hàng loạt, dedup bằng UNIQUE(url)."""
         if not urls:
             return
         with self._cursor() as cur:
@@ -234,7 +218,7 @@ class PsycopgControlPlaneRepo:
             )
 
     def claim_detail_task(self) -> Optional[DetailTask]:
-        """Claim URL `pending` có `discovered_at` nhỏ nhất — FIFO (B8)."""
+        """Claim URL `pending` có discovered_at nhỏ nhất — FIFO."""
         with self._cursor() as cur:
             cur.execute(
                 """
@@ -256,8 +240,7 @@ class PsycopgControlPlaneRepo:
             return DetailTask(queue_id=row["id"], url=row["url"])
 
     def mark_detail_fetched(self, queue_id: int) -> None:
-        """processing -> fetched. Gọi ngay sau buffer.add() (HTML đã fetch
-        xong nhưng còn chỉ nằm trong RAM, chưa flush lên S3)."""
+        """processing -> fetched, gọi ngay sau buffer.add()."""
         with self._cursor() as cur:
             cur.execute(
                 "UPDATE pipeline.detail_queue SET status = 'fetched' WHERE id = %s",
@@ -265,9 +248,7 @@ class PsycopgControlPlaneRepo:
             )
 
     def mark_details_flushed(self, queue_ids: Sequence[int]) -> None:
-        """fetched -> flushed. CHỈ gọi sau khi buffer.flush(final=False)
-        thành công (đã ghi an toàn lên S3 dưới dạng .inprogress). Batch
-        UPDATE 1 lần cho toàn bộ queue_id đã fetch tính tới thời điểm flush."""
+        """fetched -> flushed, sau buffer.flush(final=False) thành công."""
         if not queue_ids:
             return
         with self._cursor() as cur:
@@ -278,9 +259,7 @@ class PsycopgControlPlaneRepo:
             )
 
     def mark_details_done(self, queue_ids: Sequence[int]) -> None:
-        """fetched/flushed -> done. CHỈ gọi sau khi buffer.flush(final=True)
-        thành công (đã nằm trong file .parquet final) — 'done' đồng nghĩa
-        dữ liệu chắc chắn nằm trong file Silver/Silver đọc được."""
+        """fetched/flushed -> done, sau buffer.flush(final=True) thành công."""
         if not queue_ids:
             return
         with self._cursor() as cur:
@@ -291,10 +270,8 @@ class PsycopgControlPlaneRepo:
             )
 
     def mark_urls_done(self, urls: Sequence[str]) -> None:
-        """Như mark_details_done() nhưng theo url — dùng cho Lớp 2
-        (_reconcile_crashed_runs trong core.py), vì process reconciliation
-        không còn giữ list queue_id gốc của run đã chết, chỉ đọc lại được
-        url từ nội dung file parquet vừa promote."""
+        """Như mark_details_done() nhưng theo url — dùng ở Bước 7
+        (reconciliation chỉ đọc lại được url từ file parquet vừa promote)."""
         if not urls:
             return
         with self._cursor() as cur:
@@ -325,9 +302,8 @@ class PsycopgControlPlaneRepo:
             )
 
     def update_run_progress(self, run_id: str, detail_pages_done: int) -> None:
-        """Cập nhật detail_pages_done incremental, KHÔNG đụng ended_at/
-        stopped_reason (những field đó chỉ finalize_run_state() được set) —
-        lưới an toàn cho trường hợp bị kill cứng (SIGKILL/OOM) giữa 2 lần flush."""
+        """Cập nhật incremental, không đụng ended_at/stopped_reason — lưới
+        an toàn khi bị kill cứng giữa 2 lần flush."""
         with self._cursor() as cur:
             cur.execute(
                 "UPDATE pipeline.run_state SET detail_pages_done = %s WHERE run_id = %s",
@@ -335,11 +311,9 @@ class PsycopgControlPlaneRepo:
             )
 
     def list_incomplete_runs(self, older_than_seconds: int) -> list[IncompleteRun]:
-        """Lớp 2 (reconciliation) — trả về run_state có ended_at IS NULL và
-        started_at đã đủ cũ (chắc chắn không phải run hiện tại đang chạy).
-        `older_than_seconds` do core.py truyền vào (RECONCILE_STALE_RUN_AFTER_SECONDS),
-        không đọc lại STALE_RUN_THRESHOLD_SQL ở đây để tránh 2 nguồn sự thật
-        lệch nhau — core.py là nơi quyết định giá trị, module này chỉ thực thi."""
+        """Bước 7 — run_state có ended_at IS NULL và started_at đã đủ cũ.
+        older_than_seconds do core.py truyền vào, không đọc lại
+        STALE_RUN_THRESHOLD_SQL để tránh 2 nguồn sự thật lệch nhau."""
         with self._cursor() as cur:
             cur.execute(
                 """
@@ -382,11 +356,11 @@ class PsycopgControlPlaneRepo:
 
 
 # ============================================================
-# 3. Page fetcher (requests) — B4/B9/B10
+# Bước 2-3: Page fetcher (requests)
 # ============================================================
 
 class RequestsPageFetcher:
-    """PageFetcher bằng requests. Không raise exception — mọi lỗi (timeout, connect-fail, DNS...)
+    """Không raise exception — mọi lỗi (timeout, connect-fail, DNS...)
     được bọc vào FetchResult.error để core tự phân loại."""
 
     def __init__(
@@ -412,7 +386,7 @@ class RequestsPageFetcher:
                 timeout=(self._connect_timeout, self._read_timeout),
             )
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-            # ConnectionError/Timeout: proxy không dùng được -> đổi proxy ngay.
+            # Proxy không dùng được -> đổi proxy ngay.
             logger.warning("Proxy lỗi/treo url=%s proxy=%s: %s", url, proxy_url, exc)
             return FetchResult(status_code=None, error=str(exc), is_proxy_error=True)
         except requests.exceptions.RequestException as exc:
@@ -427,12 +401,12 @@ class RequestsPageFetcher:
 
 
 # ============================================================
-# 4. Buffer tích luỹ + flush S3 (boto3 + pyarrow) — B13/B14
+# Bước 5: Buffer tích luỹ + flush S3 (boto3 + pyarrow)
 # ============================================================
 
 class S3ParquetBufferWriter:
-    """BufferWriter: tích luỹ toàn bộ record trong bộ nhớ, 
-    mỗi flush ghi đè lên cùng 1 S3 key `.inprogress` để mô phỏng append."""
+    """Tích luỹ toàn bộ record trong bộ nhớ, mỗi flush ghi đè lên cùng
+    1 S3 key `.inprogress` để mô phỏng append."""
 
     def __init__(self, bucket: str, s3_client=None) -> None:
         self._bucket = bucket
@@ -477,7 +451,7 @@ class S3ParquetBufferWriter:
         if not final:
             return inprogress_key
 
-        # Nếu final=True: copy sang key chính thức rồi xoá .inprogress.
+        # final=True: copy sang key chính thức rồi xoá .inprogress.
         final_key = self.final_key(run_id, crawl_date)
         self._s3.copy_object(
             Bucket=self._bucket,
@@ -485,43 +459,39 @@ class S3ParquetBufferWriter:
             Key=final_key,
         )
 
-        # Nếu xoá lỗi -> chỉ log warning, dữ liệu vẫn an toàn ở final_key.
         try:
             self._s3.delete_object(Bucket=self._bucket, Key=inprogress_key)
-        except Exception as exc:  # noqa: BLE001 - cố ý bắt rộng, đây là bước dọn dẹp best-effort
+        except Exception as exc:  # noqa: BLE001 - dọn dẹp best-effort, dữ liệu đã an toàn ở final_key
             logger.warning(
-                "Copy thành công (%s) nhưng KHÔNG xoá được %s — dữ liệu vẫn an "
-                "toàn, chỉ còn 1 bản .inprogress thừa cần dọn thủ công sau: %s",
+                "Copy thành công (%s) nhưng KHÔNG xoá được %s: %s",
                 final_key, inprogress_key, exc,
             )
         else:
             logger.info("Rename hoàn tất -> s3://%s/%s", self._bucket, final_key)
         return final_key
 
-    # -------- Lớp 2: promote .inprogress của run đã chết thành final --------
+    # -------- Bước 7: promote .inprogress của run đã chết thành final --------
 
     def _object_exists(self, key: str) -> bool:
         try:
             self._s3.head_object(Bucket=self._bucket, Key=key)
             return True
-        except Exception:  # noqa: BLE001 - không tồn tại hoặc lỗi truy cập đều coi là "chưa có"
+        except Exception:  # noqa: BLE001 - không tồn tại hoặc lỗi truy cập đều coi "chưa có"
             return False
 
     def promote_inprogress_to_final(
         self, run_id: str, crawl_date: date
     ) -> Optional[PromotedFile]:
-        """Lớp 2 (reconciliation) — đổi .inprogress (đã ghi từ 1 run đã chết)
-        thành final, đọc luôn cột url trong đó để repo cập nhật detail_queue
-        (mark_urls_done). Idempotent: nếu final đã tồn tại từ lần gọi trước
-        (VD reconciliation bị crash NGAY GIỮA lúc đang promote), đọc thẳng
-        từ final, không copy lại — tránh copy_object thừa."""
+        """Đổi .inprogress (từ run đã chết) thành final, đọc url trong đó để
+        repo cập nhật detail_queue. Idempotent — nếu final đã tồn tại từ lần
+        gọi trước, đọc thẳng từ final, không copy lại."""
         ikey = self.inprogress_key(run_id, crawl_date)
         fkey = self.final_key(run_id, crawl_date)
 
         already_promoted = self._object_exists(fkey)
         source_key = fkey if already_promoted else ikey
         if not already_promoted and not self._object_exists(ikey):
-            return None  # run chết trước khi kịp flush lần nào -> không có gì để cứu
+            return None  # run chết trước khi kịp flush lần nào
 
         body = self._s3.get_object(Bucket=self._bucket, Key=source_key)["Body"].read()
         table = pq.read_table(io.BytesIO(body), columns=["url"])
@@ -535,37 +505,29 @@ class S3ParquetBufferWriter:
             )
             try:
                 self._s3.delete_object(Bucket=self._bucket, Key=ikey)
-            except Exception as exc:  # noqa: BLE001 - dọn dẹp best-effort, dữ liệu đã an toàn ở fkey
+            except Exception as exc:  # noqa: BLE001 - dữ liệu đã an toàn ở fkey
                 logger.warning(
                     "Promote thành công (%s) nhưng KHÔNG xoá được %s: %s", fkey, ikey, exc
                 )
             else:
-                logger.info("Lớp 2: promote hoàn tất -> s3://%s/%s", self._bucket, fkey)
+                logger.info("Bước 7: promote hoàn tất -> s3://%s/%s", self._bucket, fkey)
 
         return PromotedFile(final_key=fkey, urls=urls)
 
     def delete_inprogress(self, run_id: str, crawl_date: date) -> None:
-        """Lớp 2: dọn .inprogress của 1 run đã finalize INCOMPLETE (không đủ
-        điều kiện promote). Không tồn tại thì bỏ qua êm (trường hợp bình
-        thường: crash trước khi kịp flush lần nào) — không log warning để
-        tránh ồn log mỗi giờ."""
+        """Dọn .inprogress của run đã finalize INCOMPLETE. Không tồn tại
+        thì bỏ qua êm, không log ồn."""
         ikey = self.inprogress_key(run_id, crawl_date)
         if not self._object_exists(ikey):
             return
         try:
             self._s3.delete_object(Bucket=self._bucket, Key=ikey)
-            logger.info("Lớp 2: đã dọn .inprogress không đủ điều kiện khôi phục: %s", ikey)
-        except Exception as exc:  # noqa: BLE001 - dọn dẹp best-effort, không được chặn crawl chính
-            logger.warning(
-                "Lớp 2: không xoá được %s (bỏ qua, thử lại ở lần reconcile sau "
-                "NẾU run_state chưa finalize — nhưng ở đây đã finalize nên sẽ "
-                "KHÔNG thử lại; chấp nhận rác, không ảnh hưởng tính đúng đắn): %s",
-                ikey, exc,
-            )
+            logger.info("Bước 7: đã dọn .inprogress không đủ điều kiện khôi phục: %s", ikey)
+        except Exception as exc:  # noqa: BLE001 - dọn dẹp best-effort
+            logger.warning("Bước 7: không xoá được %s (chấp nhận rác): %s", ikey, exc)
 
-    # -------- Dọn .inprogress mồ côi --------
-    #
-    # Gọi đầu mỗi run để xoá file .inprogress thừa (an toàn vì đã có bản final).
+    # -------- Dọn .inprogress mồ côi (đầu mỗi run) --------
+
     def list_orphaned_inprogress(self, prefix: str = "bronze/") -> list[str]:
         """Liệt kê key `.inprogress` đã có bản final tương ứng."""
         paginator = self._s3.get_paginator("list_objects_v2")
@@ -583,7 +545,7 @@ class S3ParquetBufferWriter:
         """Xoá các `.inprogress` mồ côi. Không raise, chỉ log warning nếu lỗi."""
         try:
             orphaned = self.list_orphaned_inprogress(prefix)
-        except Exception as exc:  # noqa: BLE001 - cố ý bắt rộng, không được chặn crawl chính
+        except Exception as exc:  # noqa: BLE001 - không được chặn crawl chính
             logger.warning("Không liệt kê được .inprogress mồ côi (bỏ qua): %s", exc)
             return 0
 
@@ -602,11 +564,10 @@ class S3ParquetBufferWriter:
 
 
 # ============================================================
-# 5. Factory — lắp ráp core từ biến môi trường (.env)
+# Factory — lắp ráp core từ biến môi trường (.env)
 # ============================================================
 
 def build_repo_from_env() -> PsycopgControlPlaneRepo:
-    """DSN lấy từ config.get_postgres_dsn(), tự chọn đúng DSN theo ngữ cảnh."""
     return PsycopgControlPlaneRepo(config.get_postgres_dsn())
 
 
@@ -615,7 +576,7 @@ def build_buffer_from_env() -> S3ParquetBufferWriter:
 
 
 def build_proxy_pool_from_env(auto_refill: bool = True) -> ProxyPool:
-    """Tạo ProxyPool thật. auto_refill=True -> refill ngay để có proxy sẵn khi run bắt đầu."""
+    """auto_refill=True -> refill ngay để có proxy sẵn khi run bắt đầu."""
     pool = ProxyPool()
     if auto_refill:
         pool.refill()
@@ -623,14 +584,11 @@ def build_proxy_pool_from_env(auto_refill: bool = True) -> ProxyPool:
 
 
 # ============================================================
-# 6. Wiring — điểm gọi DUY NHẤT cho PythonOperator (dags/web_crawler.py)
+# Wiring — điểm gọi duy nhất cho PythonOperator (dags/web_crawler.py)
 # ============================================================
 
-# stop_reason thuộc nhóm này = "hoàn thành bình thường" (Airflow SUCCESS).
-# Ngoài nhóm này, vẫn coi thành công nếu crawl >= WEB_CRAWLER_MIN_SUCCESS_PAGES.
-# RECOVERED không nằm trong run hiện tại (đây là stop_reason của 1 run CŨ được
-# _reconcile_crashed_runs() đóng sổ hộ) nên không xuất hiện ở is_success() của
-# run_dag2() đang chạy — không cần thêm vào đây.
+# stop_reason nhóm này = hoàn thành bình thường (Airflow SUCCESS). Ngoài
+# nhóm này vẫn coi thành công nếu crawl >= WEB_CRAWLER_MIN_SUCCESS_PAGES.
 NORMAL_STOP_REASONS = frozenset({
     StopReason.MAX_PAGES,
     StopReason.TIME_BOX,
@@ -639,25 +597,24 @@ NORMAL_STOP_REASONS = frozenset({
 
 
 def is_success(result: RunResult) -> bool:
-    """Thành công nếu stop_reason thuộc NORMAL_STOP_REASONS 
-    hoặc crawl >= WEB_CRAWLER_MIN_SUCCESS_PAGES."""
+    """Thành công nếu stop_reason thuộc NORMAL_STOP_REASONS hoặc crawl đủ
+    WEB_CRAWLER_MIN_SUCCESS_PAGES."""
     if result.stop_reason in NORMAL_STOP_REASONS:
         return True
     return result.detail_pages_done >= config.WEB_CRAWLER_MIN_SUCCESS_PAGES
 
 
 def run_dag2(run_id: Optional[str] = None) -> str:
-    """Điểm gọi duy nhất từ DAG 2. Lắp repo/proxy/buffer/fetcher/clock,
-    dọn .inprogress mồ côi, chạy 1 lần (bao gồm reconciliation Lớp 2 cho run
-    trước bị crash cứng — xem WebCrawlerCore._reconcile_crashed_runs), luôn
-    đóng Postgres. Raise RuntimeError nếu is_success() = False để Airflow coi FAILED."""
+    """Điểm gọi duy nhất từ DAG 2. Lắp repo/proxy/buffer/fetcher/clock, dọn
+    .inprogress mồ côi, chạy 1 lần (gồm cả Bước 7 cho run trước bị crash
+    cứng), luôn đóng Postgres. Raise RuntimeError nếu is_success()=False."""
     if not run_id:
         run_id = f"web-{datetime.now(HCM_TZ):%Y%m%dT%H%M%S}"
 
     repo = build_repo_from_env()
     try:
         buffer = build_buffer_from_env()
-        buffer.cleanup_orphaned_inprogress()  # dọn rác từ (các) run trước, nếu có — xem mục lưu ý ở class
+        buffer.cleanup_orphaned_inprogress()
 
         core = WebCrawlerCore(
             repo=repo,
@@ -696,7 +653,7 @@ def run_dag2(run_id: Optional[str] = None) -> str:
     if result.stop_reason not in NORMAL_STOP_REASONS:
         logger.info(
             "DAG2 run_id=%s: stop_reason bất thường (%s) nhưng đã crawl đủ "
-            "%d trang (>= %d) -> THÀNH CÔNG.",
+            "%d trang (>= %d) -> vẫn tính là thành công.",
             run_id, result.stop_reason.value, result.detail_pages_done,
             config.WEB_CRAWLER_MIN_SUCCESS_PAGES,
         )

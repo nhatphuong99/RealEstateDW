@@ -1,16 +1,15 @@
 """
 dags/bronze_to_silver.py
 
-DAG 3 — ETL Bronze -> Silver (Spark parse + SQL merge SCD2).
+Thành phần 3 — DAG 3: ETL Bronze -> Silver (Spark parse + SQL merge SCD2).
 
 Task cuối `trigger_silver_to_gold` nối sang DAG 4, hoàn thiện chuỗi
 crawl -> Silver -> Gold khởi động từ DAG 2. `schedule=None` — DAG này
 luôn được DAG 2 trigger, không tự chạy theo lịch riêng.
 
 `run_etl.expand(s3_key=keys) >> trigger_silver_to_gold`: trigger chỉ chạy
-sau khi mọi mapped instance của run_etl xong — kể cả khi `keys` rỗng (0
-file pending), Airflow vẫn chạy trigger bình thường -> Gold refresh
-no-op an toàn (ETL Gold idempotent).
+sau khi mọi mapped instance của run_etl xong — kể cả khi `keys` rỗng, vẫn
+chạy trigger bình thường (Gold ETL idempotent, no-op an toàn).
 """
 
 from __future__ import annotations
@@ -40,7 +39,7 @@ default_args = {
 with DAG(
     dag_id="bronze_to_silver",
     description="DAG 3 - ETL Bronze -> Silver (Spark parse + SQL merge SCD2), tự động nối sang DAG 4",
-    schedule=None,  # KHÔNG tự chạy theo lịch riêng — luôn được DAG 2 trigger
+    schedule=None,
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Ho_Chi_Minh"),
     catchup=False,
     max_active_runs=1,
@@ -60,16 +59,16 @@ with DAG(
         max_active_tis_per_dag=config.SPARK_MAX_ACTIVE_TASKS,
     )(run_etl_bronze_to_silver)
 
-    # trigger_run_id="{{ run_id }}" của DAG 3 (KHÔNG phải run_id gốc của DAG 2)
-    # — mỗi DAG namespace run_id riêng, không xung đột, vẫn đủ để trace theo
-    # thời gian trigger trong Airflow UI.
+    # trigger_run_id="{{ run_id }}" của DAG 3 (không phải run_id gốc của
+    # DAG 2) — mỗi DAG namespace run_id riêng, vẫn đủ để trace theo thời
+    # gian trigger trên Airflow UI.
     trigger_silver_to_gold = TriggerDagRunOperator(
         task_id="trigger_silver_to_gold",
         trigger_dag_id="silver_to_gold",
         trigger_run_id="{{ run_id }}",
         wait_for_completion=True,
         deferrable=True,
-        poke_interval=15,  # Gold ETL là SQL-only, thường nhanh hơn Silver nhiều — poll dày hơn
+        poke_interval=15,  # Gold ETL là SQL-only, thường nhanh -> poll dày hơn
     )
 
     cleanup_tmp >> reset_stuck >> discover >> keys

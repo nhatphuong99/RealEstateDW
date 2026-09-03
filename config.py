@@ -1,17 +1,14 @@
 """
 config.py (project root)
 
-Cấu hình dùng chung cho toàn project. Chỉ đặt tham số dùng ở ≥2 package
-(crawler, parser). Tham số đặc thù (proxy, Spark...) giữ riêng trong
-crawler/config.py hoặc parser/config.py. Nội dung: DSN Postgres DW,
-S3 bucket Bronze, AWS region, RUNNING_IN_CONTAINER.
+Cấu hình dùng chung cho toàn project (≥2 package: crawler, parser).
+Tham số đặc thù (proxy, Spark...) giữ riêng trong crawler/config.py hoặc parser/config.py.
 """
 
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# .env nằm cùng cấp với file config.py (project root).
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=_ENV_PATH)
 
@@ -24,7 +21,7 @@ def _require(name: str) -> str:
     return value
 
 
-# Database (Postgres DW) — .env luôn có cả DSN trong/ngoài container.
+# Database (Postgres DW)
 RUNNING_IN_CONTAINER = os.getenv("AIRFLOW_HOME") is not None
 
 def get_postgres_dsn() -> str:
@@ -34,8 +31,7 @@ def get_postgres_dsn() -> str:
     return _require("POSTGRES_DW_DSN_LOCAL")
 
 
-# AWS S3 (Bronze layer)
-# Không re-export AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY — boto3/Spark tự đọc từ os.environ.
+# AWS S3 (Bronze layer) — boto3/Spark tự đọc AWS_ACCESS_KEY_ID/SECRET từ os.environ.
 def get_s3_bucket() -> str:
     return _require("S3_BRONZE_BUCKET")
 

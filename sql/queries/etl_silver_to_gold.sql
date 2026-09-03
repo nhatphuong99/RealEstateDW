@@ -105,7 +105,7 @@ ON CONFLICT (feature_key) DO NOTHING;
 --    khi has_*/owner_direct là BOOLEAN nullable.
 -- ----------------------------------------------------------------------
 INSERT INTO gold.fact_listing_price (
-    listing_key, listing_id, listing_url,
+    listing_key, listing_id,
     location_key, property_type_key, feature_key, source_key,
     posted_date_key,
     valid_from, valid_to, is_current,
@@ -117,7 +117,6 @@ INSERT INTO gold.fact_listing_price (
 SELECT
     h.listing_key,
     h.listing_id,
-    h.listing_url,
     loc.location_key,
     pt.property_type_key,
     gold.compute_feature_key(
@@ -163,7 +162,6 @@ JOIN gold.dim_source src
    AND src.source_part = h.source_part
 ON CONFLICT (listing_key) DO UPDATE SET
     listing_id                 = EXCLUDED.listing_id,
-    listing_url                = EXCLUDED.listing_url,
     location_key                = EXCLUDED.location_key,
     property_type_key           = EXCLUDED.property_type_key,
     feature_key                  = EXCLUDED.feature_key,

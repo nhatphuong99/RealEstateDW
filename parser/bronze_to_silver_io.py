@@ -1,10 +1,9 @@
 """
 parser/bronze_to_silver_io.py
 
-I/O layer cho ETL Bronze -> Silver (Phase 2).
-Module duy nhất trong parser được phép import boto3/pyspark/psycopg2,
-tách biệt core/io. Thứ tự: Task 9 (SparkSession) -> Task 10 (parse_partition)
--> Task 11 (đọc Bronze S3) -> Task 12 (split + ghi JDBC).
+Thành phần 3 (ETL Bronze -> Silver) — I/O layer, module duy nhất trong
+parser được phép import boto3/pyspark. Thứ tự: dựng SparkSession (Bước 2)
+-> đọc Bronze S3 (Bước 2) -> parse_partition (Bước 3) -> split + ghi JDBC (Bước 5).
 """
 
 from __future__ import annotations
@@ -37,7 +36,7 @@ from parser.config import (
 
 
 # ---------------------------------------------------------------------------
-# Task 9 — Dựng SparkSession
+# Bước 2 — Dựng SparkSession
 # ---------------------------------------------------------------------------
 
 
@@ -52,21 +51,19 @@ def _collect_jars(jars_dir: str) -> str:
 
 
 def build_spark_session() -> SparkSession:
-    """Dựng SparkSession"""
     return (
         SparkSession.builder.appName(SPARK_APP_NAME)
         .master(SPARK_MASTER)
         .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
         .config("spark.jars", _collect_jars(SPARK_JARS_DIR))
-        # Tắt vectorized reader cho Parquet: cột `html` có độ dài biến động lớn,
-        # dễ OOM khi batch gặp HTML bất thường. Row-based chậm hơn chút nhưng ổn định hơn.
+        # Tắt vectorized reader: cột html dài biến động lớn, dễ OOM.
         .config("spark.sql.parquet.enableVectorizedReader", "false")
         .getOrCreate()
     )
 
 
 # ---------------------------------------------------------------------------
-# Task 10 — parse_partition(): wrapper mapPartitions gọi parse_listing_html()
+# Bước 3 — parse_partition(): wrapper mapPartitions gọi parse_listing_html()
 # ---------------------------------------------------------------------------
 
 # Thứ tự cột phải khớp _to_output_row() và silver.listing_staging_batch,
@@ -85,11 +82,11 @@ UNIFIED_PARSE_SCHEMA = StructType(
         StructField("price_vnd", DecimalType(16, 0), nullable=True),
         StructField("price_raw", StringType(), nullable=True),
         StructField("price_is_negotiable", BooleanType(), nullable=True),
-        StructField("price_is_outlier", BooleanType(), nullable=True),   # MỚI (Phase 5)
+        StructField("price_is_outlier", BooleanType(), nullable=True),
         StructField("area_m2", DecimalType(10, 2), nullable=True),
         StructField("area_raw", StringType(), nullable=True),
         StructField("area_is_undetermined", BooleanType(), nullable=True),
-        StructField("area_is_outlier", BooleanType(), nullable=True),   # MỚI
+        StructField("area_is_outlier", BooleanType(), nullable=True),
         StructField("length_m", DecimalType(6, 2), nullable=True),
         StructField("width_m", DecimalType(6, 2), nullable=True),
         StructField("street_width_m", DecimalType(6, 2), nullable=True),
@@ -111,7 +108,7 @@ UNIFIED_PARSE_SCHEMA = StructType(
         StructField("address_ward_old", StringType(), nullable=True),
         StructField("address_district_old", StringType(), nullable=True),
         StructField("address_province_old", StringType(), nullable=True),
-        # --- 2 cột chỉ có giá trị ở nhánh quarantine ---
+        # 2 cột chỉ có giá trị ở nhánh quarantine
         StructField("error_reason", StringType(), nullable=True),
         StructField("raw_html", BinaryType(), nullable=True),
     ]
@@ -125,8 +122,8 @@ def _decimal_or_none(value: Optional[Decimal]) -> Optional[Decimal]:
 
 def _to_output_row(result) -> Row:
     """Map ParsedListing | ParseError -> Row theo đúng thứ tự UNIFIED_PARSE_SCHEMA.
-    Không dùng dict (Row(**kwargs)) vì thứ tự field không đảm bảo khớp StructType,
-    an toàn nhất là liệt kê positional."""
+    Liệt kê positional (không dùng dict) vì Row(**kwargs) không đảm bảo
+    khớp thứ tự StructType."""
     if isinstance(result, ParsedListing):
         return Row(
             result.listing_id,
@@ -141,11 +138,11 @@ def _to_output_row(result) -> Row:
             _decimal_or_none(result.price_vnd),
             result.price_raw,
             result.price_is_negotiable,
-            result.price_is_outlier,   # MỚI (Phase 5)
+            result.price_is_outlier,
             _decimal_or_none(result.area_m2),
             result.area_raw,
             result.area_is_undetermined,
-            result.area_is_outlier,   # MỚI
+            result.area_is_outlier,
             _decimal_or_none(result.length_m),
             _decimal_or_none(result.width_m),
             _decimal_or_none(result.street_width_m),
@@ -172,8 +169,7 @@ def _to_output_row(result) -> Row:
         )
 
     if isinstance(result, ParseError):
-        # 30 cột giữa crawl_date và error_reason (title..address_province_old)
-        # đều None — chỉ success mới có giá trị.
+        # 30 cột giữa crawl_date và error_reason đều None — chỉ success mới có giá trị.
         return Row(
             None,  # listing_id
             result.listing_url,
@@ -189,9 +185,9 @@ def _to_output_row(result) -> Row:
 
 
 def parse_partition(source_part: str, source_bronze_key: str):
-    """Factory cho rdd.mapPartitions(): đóng gói source_part/source_bronze_key qua closure
-    vì parse_listing_html() cần mà parquet không có. Dùng mapPartitions thay UDF để tránh
-    overhead serialize từng row (parser gọi BeautifulSoup per-row)."""
+    """Factory cho rdd.mapPartitions(): đóng gói source_part/source_bronze_key
+    qua closure. Dùng mapPartitions thay UDF để tránh overhead serialize
+    từng row (parser gọi BeautifulSoup per-row)."""
 
     def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
         for row in rows:
@@ -202,8 +198,7 @@ def parse_partition(source_part: str, source_bronze_key: str):
                 source_part=source_part,
                 source_bronze_key=source_bronze_key,
             )
-            # Tin ngoài phạm vi đồ án -> bỏ qua lặng lẽ,
-            # KHÔNG ghi staging lẫn quarantine, giảm khối lượng ETL.
+            # Tin ngoài phạm vi -> bỏ qua lặng lẽ, không ghi staging lẫn quarantine.
             if isinstance(result, ParsedListing) and not is_in_scope(result):
                 continue
             yield _to_output_row(result)
@@ -212,7 +207,7 @@ def parse_partition(source_part: str, source_bronze_key: str):
 
 
 # ---------------------------------------------------------------------------
-# Task 11 — Đọc 1 file parquet Bronze cụ thể từ S3
+# Bước 2 — Đọc 1 file parquet Bronze cụ thể từ S3
 # ---------------------------------------------------------------------------
 
 _BRONZE_REQUIRED_COLUMNS = {"url", "crawl_date", "html"}
@@ -229,10 +224,8 @@ def _validate_bronze_schema(df: DataFrame, s3_key: str) -> None:
 
 
 def download_bronze_file(s3_key: str) -> tempfile.TemporaryDirectory:
-    """Tải 1 file Bronze từ S3 về thư mục tạm local, KHÔNG cần SparkSession.
-    Trả về TemporaryDirectory (caller giữ tham chiếu để tự cleanup sau khi
-    Spark đọc xong — tránh xoá sớm khi Spark còn lazy-read). Tách khỏi Spark
-    read, chạy TRƯỚC khi JVM khởi động, tránh JVM chiếm CPU làm nghẽn download qua boto3."""
+    """Tải 1 file Bronze về thư mục tạm local, không cần SparkSession —
+    chạy trước khi JVM khởi động, tránh JVM chiếm CPU làm nghẽn download."""
     s3_client = boto3.client("s3")
     bucket = get_s3_bucket()
     tmp_dir = tempfile.TemporaryDirectory(prefix=BRONZE_TMP_DIR_PREFIX)
@@ -242,8 +235,8 @@ def download_bronze_file(s3_key: str) -> tempfile.TemporaryDirectory:
 
 
 def read_bronze_parquet(spark: SparkSession, local_path: str, s3_key: str) -> DataFrame:
-    """Đọc file parquet Bronze ĐÃ TẢI SẴN vào Spark DataFrame. 
-    Vẫn phải .cache() + .count() ngay trong hàm (lý do lazy evaluation)."""
+    """Đọc file Bronze đã tải sẵn vào Spark DataFrame. Vẫn phải .cache() +
+    .count() ngay trong hàm do lazy evaluation."""
     df = spark.read.parquet(local_path)
     _validate_bronze_schema(df, s3_key)
     result_df = df.select("url", "crawl_date", "html").repartition(8).cache()
@@ -252,13 +245,11 @@ def read_bronze_parquet(spark: SparkSession, local_path: str, s3_key: str) -> Da
 
 
 # ---------------------------------------------------------------------------
-# Task 12 — Split success/quarantine (12a) + ghi JDBC (12b)
+# Bước 5 — Split success/quarantine + ghi JDBC
 # ---------------------------------------------------------------------------
 
-# Cột silver.listing_staging_batch theo UNIFIED_PARSE_SCHEMA,
-# trừ error_reason/raw_html (chỉ quarantine) và row_hash (Postgres tự tính).
-# Cột silver.listing_staging_batch theo UNIFIED_PARSE_SCHEMA,
-# trừ error_reason/raw_html (chỉ quarantine) và row_hash (Postgres tự tính).
+# Cột silver.listing_staging_batch theo UNIFIED_PARSE_SCHEMA, trừ
+# error_reason/raw_html (chỉ quarantine) và row_hash (Postgres tự tính).
 _STAGING_COLUMNS = [
     "listing_id", "listing_url", "source_part", "source_bronze_key",
     "crawl_date", "title", "listing_type", "property_type", "posted_date",
@@ -274,12 +265,10 @@ _STAGING_COLUMNS = [
 
 
 def split_success_and_quarantine(combined_df: DataFrame) -> tuple[DataFrame, DataFrame]:
-    """Task 12a — tách combined_df thành 2 DataFrame theo error_reason IS NULL,
-    tránh gọi mapPartitions() 2 lần (không parse HTML gấp đôi)."""
+    """Tách theo error_reason IS NULL, tránh gọi mapPartitions() 2 lần."""
     success_df = combined_df.filter(col("error_reason").isNull()).select(*_STAGING_COLUMNS)
 
-    # parse_quarantine dùng tên cột "url" (không phải "listing_url") —
-    # xem 005_etl_bronze_to_silver_control.sql. Alias lại cho khớp đích.
+    # parse_quarantine dùng tên cột "url" (không phải "listing_url") — alias lại.
     quarantine_df = (
         combined_df.filter(col("error_reason").isNotNull())
         .select(
@@ -294,8 +283,7 @@ def split_success_and_quarantine(combined_df: DataFrame) -> tuple[DataFrame, Dat
 
 
 def _jdbc_url_and_properties(dsn: str) -> tuple[str, dict[str, str]]:
-    """Chuyển DSN psycopg2 ('postgresql://...') sang JDBC URL + user/password,
-    vì Spark JDBC không parse trực tiếp DSN psycopg2."""
+    """Chuyển DSN psycopg2 sang JDBC URL + user/password."""
     parsed = urlparse(dsn)
     jdbc_url = f"jdbc:postgresql://{parsed.hostname}:{parsed.port}{parsed.path}"
     properties = {
@@ -307,15 +295,12 @@ def _jdbc_url_and_properties(dsn: str) -> tuple[str, dict[str, str]]:
 
 
 def write_staging_and_quarantine(combined_df: DataFrame) -> tuple[int, int]:
-    """Task 12b — ghi DataFrame vào silver.listing_staging_batch và silver.parse_quarantine qua JDBC.
-
-    Mode chỉ 'append' (không overwrite để giữ cột GENERATED row_hash).
-    TRUNCATE staging_batch trước mỗi batch do orchestrator quản lý, không nằm trong hàm này.
-    Trả về (success_count, quarantine_count) để Task 13 đối chiếu với COUNT(*) trên Postgres."""
+    """Ghi vào silver.listing_staging_batch + silver.parse_quarantine qua
+    JDBC (mode='append' — giữ cột GENERATED row_hash). TRUNCATE staging
+    trước mỗi batch do orchestrator quản lý, không nằm trong hàm này."""
     success_df, quarantine_df = split_success_and_quarantine(combined_df)
 
-    # Cache trước khi count() + write() — tránh Spark chạy lại toàn bộ
-    # mapPartitions() (gồm cả BeautifulSoup parse) 2 lần cho cùng 1 DataFrame.
+    # Cache trước count()+write() — tránh Spark chạy lại mapPartitions() 2 lần.
     success_df.cache()
     quarantine_df.cache()
 

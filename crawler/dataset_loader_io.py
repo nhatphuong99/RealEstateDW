@@ -1,18 +1,12 @@
 """
 crawler/dataset_loader_io.py
 
-Thực hiện các Protocol trong dataset_loader_core.py:
-    - RequestsPartFetcher -> tải CDN part1..77.parquet
-    - S3PartUploader      -> upload lên S3
-    - PsycopgPartStateStore -> lưu trạng thái dataset (Postgres)
-    - compute_parts_to_process_task() / process_one_part_task() -> 2 task duy nhất
-      được dags/bronze_load_dataset.py gọi
+Thành phần 1 (Dataset Loader) — I/O thật cho các Protocol trong
+dataset_loader_core.py: RequestsPartFetcher (CDN), S3PartUploader,
+PsycopgPartStateStore. 2 hàm cuối file là điểm gọi duy nhất cho
+dags/dataset_loader.py.
 
-Core không biết module này — mọi import psycopg2/boto3/requests chỉ nằm ở đây,
-đảm bảo tách biệt logic khỏi I/O (giống web_crawler_io.py Nhóm B).
-
-Khác Nhóm B: không viết retry loop — lỗi probe/download/upload ghi vào DB rồi raise,
-để Airflow tự retry đúng Task Instance (quyết định D1).
+Không viết retry loop — lỗi ghi vào DB rồi raise, để Airflow tự retry.
 """
 
 
@@ -46,9 +40,7 @@ logger = logging.getLogger("dataset_loader_io")
 
 HCM_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
-# CDN/WAF có thể chặn User-Agent mặc định của requests
-# (như GeoNode trong proxy_manager.py) → đặt sẵn UA giả trình duyệt.
-# Lưu ý: không liên quan lỗi HTTP 530 (Cloudflare Origin DNS Error).
+# CDN/WAF có thể chặn User-Agent mặc định của requests -> giả UA trình duyệt.
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -58,11 +50,11 @@ DEFAULT_HEADERS = {
 
 
 # ============================================================
-# 1. RequestsPartFetcher — implement Protocol PartFetcher
+# Bước 2-3: RequestsPartFetcher — probe + download
 # ============================================================
 
 class RequestsPartFetcher:
-    """GET trực tiếp CDN, không qua proxy — CDN không chặn/rate-limit."""
+    """GET trực tiếp CDN, không qua proxy."""
 
     def __init__(
         self,
@@ -80,8 +72,7 @@ class RequestsPartFetcher:
         return f"{self._base_url}/part{part_number}.parquet"
 
     def probe(self, part_number: int) -> ProbeResult:
-        """GET + Range: bytes=0-0 (không dùng HEAD — CDN trả 401 sai chuẩn).
-        Dùng `stream=True` để chỉ kiểm tra tồn tại, không tải toàn bộ file."""
+        """GET + Range: bytes=0-0 (không dùng HEAD — CDN trả 401 sai chuẩn)."""
         url = self._part_url(part_number)
         try:
             response = requests.get(
@@ -101,9 +92,8 @@ class RequestsPartFetcher:
 
     @staticmethod
     def _parse_total_size(headers) -> Optional[int]:
-        """Ưu tiên lấy kích thước file từ **Content-Range** (ví dụ "bytes 0-0/12345" → 12345).
-        **Content-Length** khi dùng Range chỉ là kích thước phần trả về, không phải tổng."""
-
+        """Ưu tiên Content-Range (VD "bytes 0-0/12345" -> 12345) vì
+        Content-Length khi dùng Range chỉ là size phần trả về."""
         content_range = headers.get("Content-Range")
         if content_range and "/" in content_range:
             total = content_range.rsplit("/", 1)[-1]
@@ -126,7 +116,7 @@ class RequestsPartFetcher:
 
 
 # ============================================================
-# 2. S3PartUploader — implement Protocol PartUploader
+# Bước 4: S3PartUploader
 # ============================================================
 
 class S3PartUploader:
@@ -139,13 +129,13 @@ class S3PartUploader:
         key = f"{self._prefix}part={part_number}.parquet"
         try:
             self._s3.put_object(Bucket=self._bucket, Key=key, Body=data)
-        except Exception as exc:  # noqa: BLE001 - mọi lỗi boto3 đều coi là upload fail
+        except Exception as exc:  # noqa: BLE001
             return UploadResult(success=False, error=str(exc))
         return UploadResult(success=True, s3_key=key)
 
 
 def list_existing_s3_keys(bucket: str, prefix: str, s3_client=None) -> set[str]:
-    """Liệt kê tất cả key thực trên S3 dưới `prefix` để đối chiếu với pipeline.dataset_part_state."""
+    """Liệt kê key thực trên S3 để đối chiếu với pipeline.dataset_part_state."""
     s3 = s3_client or boto3.client("s3")
     paginator = s3.get_paginator("list_objects_v2")
     keys: set[str] = set()
@@ -156,12 +146,11 @@ def list_existing_s3_keys(bucket: str, prefix: str, s3_client=None) -> set[str]:
 
 
 # ============================================================
-# 3. PsycopgPartStateStore — implement Protocol PartStateStore
+# PsycopgPartStateStore — Postgres pipeline.dataset_part_state
 # ============================================================
 
 class PsycopgPartStateStore:
-    """Thao tác bảng pipeline.dataset_part_state (DDL: sql/002_dataset_part_state.sql).
-    `autocommit=True` — mỗi method là 1 statement độc lập, giống PsycopgControlPlaneRepo Nhóm B."""
+    """autocommit=True — mỗi method là 1 statement độc lập."""
 
     def __init__(self, dsn: str) -> None:
         self._conn = psycopg2.connect(dsn)
@@ -213,7 +202,7 @@ class PsycopgPartStateStore:
 
 
 # ============================================================
-# 4. Factory — đọc cấu hình qua crawler/config.py
+# Factory — đọc cấu hình qua crawler/config.py
 # ============================================================
 
 def build_part_fetcher_from_env() -> RequestsPartFetcher:
@@ -234,12 +223,12 @@ def build_state_store_from_env() -> PsycopgPartStateStore:
 
 
 # ============================================================
-# 5. Wiring — 2 điểm gọi DUY NHẤT cho dags/bronze_load_dataset.py
+# Wiring — 2 điểm gọi cho dags/dataset_loader.py
 # ============================================================
 
 def compute_parts_to_process_task() -> list[int]:
-    """Điểm gọi cho Task 1 (không mapped) — trả về danh sách part_number
-    cần xử lý, dùng trực tiếp làm input cho `.expand()` của Task 2."""
+    """Task không mapped — trả về danh sách part_number cần xử lý,
+    dùng làm input cho `.expand()` của process_one_part_task."""
     with build_state_store_from_env() as store:
         states = store.list_states()
 
@@ -259,9 +248,8 @@ def compute_parts_to_process_task() -> list[int]:
 
 
 def process_one_part_task(part_number: int) -> None:
-    """Điểm gọi cho Task 2 (mapped, 1 Task Instance / part). Lỗi ở bất kỳ
-    bước nào -> ghi pipeline.dataset_part_state rồi `raise` ngay để Airflow
-    tự retry đúng Task Instance này."""
+    """Task mapped, 1 Task Instance/part. Lỗi -> ghi DB rồi raise để
+    Airflow tự retry đúng instance này."""
     outcome: PartOutcome = process_one_part(
         part_number,
         fetcher=build_part_fetcher_from_env(),

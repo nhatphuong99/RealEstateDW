@@ -1,14 +1,11 @@
 """
 crawler/proxy_manager.py
 
-Quản lý proxy động cho crawler:
-- Nguồn: ProxyScrape v4; GeoNode.
+Thành phần 2 (Web Crawler) — quản lý proxy động:
+- Nguồn: ProxyScrape v4, GeoNode.
 - Health-check song song qua httpbin.org/ip.
-- ProxyPool: round-robin + refill; implement Protocol ProxyPool (current/rotate/mark_failed)
-  — cắm thẳng vào WebCrawlerCore.
-- Không persist proxy xuống DB (proxy free chết nhanh).
-- Ghi chú API: ProxyScrape trả text — phải lọc tiền tố "http://";
-  GeoNode yêu cầu User-Agent giả trình duyệt (thiếu → 403).
+- ProxyPool: round-robin + refill, implement Protocol ProxyPool (current/rotate/mark_failed).
+- Không persist proxy xuống DB — proxy free chết nhanh, refill lại khi cần.
 """
 
 
@@ -30,8 +27,7 @@ PROXYSCRAPE_URL = "https://api.proxyscrape.com/v4/free-proxy-list/get"
 GEONODE_URL = "https://proxylist.geonode.com/api/proxy-list"
 HEALTH_CHECK_URL = "https://httpbin.org/ip"
 
-# GeoNode chặn User-Agent mặc định của requests/curl (403) — đã xác nhận
-# thực tế, BẮT BUỘC set header giả trình duyệt.
+# GeoNode chặn User-Agent mặc định (403) — bắt buộc set header giả trình duyệt.
 GEONODE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -48,9 +44,7 @@ def fetch_from_proxyscrape(
     timeout: float = config.PROXYSCRAPE_TIMEOUT_SECONDS,
     limit: int = config.PROXYSCRAPE_LIMIT,
 ) -> list[str]:
-    """Lấy proxy từ ProxyScrape v4 (không cần API key).
-    Trả về dạng "http://ip:port" — chỉ giữ proxy http://, loại bỏ socks4/socks5
-    (vì API filter protocol=http không chuẩn tuyệt đối)."""
+    """Chỉ giữ proxy dạng http://, loại socks4/socks5."""
     try:
         response = requests.get(
             PROXYSCRAPE_URL,
@@ -77,8 +71,7 @@ def fetch_from_geonode(
     timeout: float = config.GEONODE_TIMEOUT_SECONDS,
     limit: int = config.GEONODE_LIMIT,
 ) -> list[str]:
-    """Lấy danh sách proxy HTTP từ GeoNode. BẮT BUỘC có header User-Agent
-    thật — thiếu sẽ bị 403."""
+    """Lấy proxy HTTP từ GeoNode."""
     try:
         response = requests.get(
             GEONODE_URL,
@@ -138,8 +131,6 @@ def health_check_one(proxy_url: str, timeout: float) -> bool:
 def health_check_parallel(
     candidates: list[str], max_workers: int, timeout: float
 ) -> list[str]:
-    """Health-check song song nhiều proxy."""
-
     if not candidates:
         return []
 
@@ -153,7 +144,7 @@ def health_check_parallel(
             try:
                 if future.result():
                     alive.append(proxy)
-            except Exception:  # noqa: BLE001 - health-check không được phép làm crash refill()
+            except Exception:  # noqa: BLE001 - health-check không được crash refill()
                 logger.debug("Health-check lỗi bất thường với proxy %s", proxy)
 
     logger.info("Health-check: %d/%d proxy còn sống", len(alive), len(candidates))
@@ -165,9 +156,7 @@ def fetch_fresh_proxies(
     health_check_workers: int = config.PROXY_HEALTH_CHECK_WORKERS,
     health_check_timeout: float = config.PROXY_HEALTH_CHECK_TIMEOUT_SECONDS,
 ) -> list[str]:
-    """Lấy proxy mới từ cả 2 nguồn, gộp + dedup (giữ thứ tự),
-    health-check song song, trả về danh sách proxy còn sống và đủ nhanh
-    (timeout ngắn tự loại proxy quá tải/dùng băng thông kém)."""
+    """Gộp 2 nguồn, dedup (giữ thứ tự), health-check song song."""
     proxyscrape_proxies = fetch_from_proxyscrape()
     geonode_proxies = fetch_from_geonode()
 
@@ -187,12 +176,9 @@ def fetch_fresh_proxies(
 # ============================================================
 
 class ProxyPool:
-    """Quản lý pool proxy trong bộ nhớ (không lưu DB — proxy free chết nhanh).
-    Implement Protocol ProxyPool (current/rotate/mark_failed), cắm thẳng vào WebCrawlerCore.
-
-    `refill()` là method riêng, orchestrator (DAG) tự gọi khi cần bổ sung proxy
-    (đầu run hoặc khi cạn) — network call tốn thời gian, không gọi trong vòng lặp fetch chính."""
-
+    """Pool proxy trong bộ nhớ. refill() do orchestrator tự gọi khi cần
+    (đầu run hoặc khi cạn) — network call tốn thời gian, không gọi trong
+    vòng lặp fetch chính."""
 
     def __init__(self, proxies: Optional[list[str]] = None) -> None:
         self._lock = threading.Lock()
@@ -203,7 +189,7 @@ class ProxyPool:
     def __len__(self) -> int:
         return len(self._proxies)
 
-    # -------- Protocol ProxyPool (dùng bởi WebCrawlerCore) --------
+    # -------- Protocol ProxyPool --------
 
     def current(self) -> Optional[str]:
         with self._lock:
@@ -232,7 +218,7 @@ class ProxyPool:
         with self._lock:
             self._failed.add(proxy_url)
 
-    # -------- Mutation riêng, orchestrator (DAG) tự gọi --------
+    # -------- Mutation riêng, orchestrator tự gọi --------
 
     def refill(
         self,
@@ -240,8 +226,7 @@ class ProxyPool:
         health_check_workers: int = config.PROXY_HEALTH_CHECK_WORKERS,
         health_check_timeout: float = config.PROXY_HEALTH_CHECK_TIMEOUT_SECONDS,
     ) -> int:
-        """Fetch + health-check proxy mới, thay toàn bộ danh sách hiện tại
-        (bỏ danh sách failed cũ). Trả về số proxy sống và đủ nhanh."""
+        """Thay toàn bộ danh sách hiện tại bằng proxy mới đã health-check."""
         fresh = fetch_fresh_proxies(max_candidates, health_check_workers, health_check_timeout)
         with self._lock:
             self._proxies = fresh
@@ -251,14 +236,12 @@ class ProxyPool:
         return len(fresh)
 
     def healthy_count(self) -> int:
-        """Số proxy hiện còn hợp lệ (chưa bị mark_failed) trong pool."""
         with self._lock:
             return len([p for p in self._proxies if p not in self._failed])
 
 
 if __name__ == "__main__":
-    # Smoke test thủ công — CHỈ chạy trên máy có mạng thật, không chạy
-    # trong CI/sandbox (2 API không nằm trong domain allowlist của agent).
+    # Smoke test thủ công — chỉ chạy trên máy có mạng thật.
     logging.basicConfig(level=logging.INFO)
     pool = ProxyPool()
     n = pool.refill()

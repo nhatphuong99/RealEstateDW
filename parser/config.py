@@ -1,12 +1,11 @@
 """
 parser/config.py
 
-Cấu hình đặc thù cho package parser (Spark IO layer). Chỉ chứa tham số
-riêng của parser (SparkSession) — tham số dùng chung với crawler/ (DSN
-Postgres, S3 bucket, AWS region, RUNNING_IN_CONTAINER) import lại từ
+Thành phần 3+4 — cấu hình riêng cho parser (Spark IO layer). Tham số dùng
+chung với crawler/ (DSN Postgres, S3 bucket, AWS region) import từ
 config.py gốc, không định nghĩa trùng.
 
-parser/bronze_to_silver_core.py (logic thuần) KHÔNG import module này.
+bronze_to_silver_core.py (logic thuần) không import module này.
 """
 
 import importlib.util
@@ -32,7 +31,7 @@ SPARK_MAX_ACTIVE_TASKS = 1
 BRONZE_TMP_DIR_PREFIX = "bronze_dl_"
 
 # ---------------------------------------------------------------------
-# SparkSession (Task 9)
+# SparkSession (Thành phần 3, Bước 2)
 # ---------------------------------------------------------------------
 SPARK_APP_NAME = os.getenv("SPARK_APP_NAME", "bronze_to_silver")
 SPARK_MASTER = os.getenv("SPARK_MASTER", "local[2]")

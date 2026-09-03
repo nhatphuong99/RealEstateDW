@@ -1,10 +1,10 @@
 """
 parser/bronze_file_state_io.py
 
-I/O control-plane cho Phase 4: quét S3 tìm file Bronze mới (Task 18) và
-chạy ETL trọn vẹn 1 file Bronze -> Silver, gộp Phase 2 (Spark parse) +
-Phase 3 (SQL merge SCD2) (Task 19). Tách riêng khỏi bronze_to_silver_io.py
-vì đây là lớp orchestration/control-plane, không phải logic Spark thuần.
+Thành phần 3 (ETL Bronze -> Silver) — control-plane: quét S3 tìm file
+Bronze mới (Bước 1) và chạy ETL trọn vẹn 1 file (Bước 2-7, gộp Spark
+parse + merge SCD2). Tách khỏi bronze_to_silver_io.py vì đây là lớp
+orchestration/control-plane, không phải logic Spark thuần.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ _MERGE_SCD2_SQL_PATH = _PROJECT_ROOT / "sql" / "queries" / "merge_scd2_listing_h
 
 
 # ---------------------------------------------------------------------------
-#   discover_pending_files
+# Bước 1 — discover_pending_files
 # ---------------------------------------------------------------------------
 
 
@@ -56,8 +56,8 @@ def _infer_source(s3_key: str) -> str:
 
 
 def list_bronze_parquet_keys(s3_client=None) -> list[str]:
-    """List toàn bộ key .parquet dưới prefix bronze/ trên S3.
-    Dùng paginator vì list_objects_v2 giới hạn 1000 object/page."""
+    """List toàn bộ key .parquet dưới prefix bronze/ (dùng paginator vì
+    list_objects_v2 giới hạn 1000 object/page)."""
     s3_client = s3_client or boto3.client("s3")
     bucket = get_s3_bucket()
     paginator = s3_client.get_paginator("list_objects_v2")
@@ -72,10 +72,8 @@ def list_bronze_parquet_keys(s3_client=None) -> list[str]:
 
 
 def discover_pending_files() -> int:
-    """Quét S3, insert key Bronze mới vào pipeline.bronze_file_state (status='pending').
-    Idempotent qua ON CONFLICT (s3_key) DO NOTHING. Dùng execute_values(fetch=True)
-    + RETURNING thay vì cur.rowcount (không đáng tin sau executemany).
-    Trả về số dòng mới thực sự được insert."""
+    """Quét S3, insert key mới vào pipeline.bronze_file_state (status='pending').
+    Idempotent qua ON CONFLICT DO NOTHING. Trả về số dòng mới thực sự insert."""
     keys = list_bronze_parquet_keys()
     if not keys:
         return 0
@@ -104,10 +102,8 @@ def discover_pending_files() -> int:
 
 
 def cleanup_orphaned_tmp_dirs(max_age_hours: float = 12.0) -> int:
-    """Xóa thư mục /tmp/bronze_dl_* còn sót lại từ lần chạy trước bị kill cứng. 
-    Chỉ động vào đúng prefix 'bronze_dl_' — an toàn với tmp dir khác trong cùng container.
-
-    Trả về số thư mục đã xóa."""
+    """Xóa thư mục /tmp/bronze_dl_* còn sót từ lần chạy trước bị kill cứng.
+    Chỉ động vào prefix 'bronze_dl_'. Trả về số thư mục đã xóa."""
     base_tmp_dir = tempfile.gettempdir()
     cutoff = time.time() - max_age_hours * 3600
     removed = 0
@@ -122,14 +118,13 @@ def cleanup_orphaned_tmp_dirs(max_age_hours: float = 12.0) -> int:
                 shutil.rmtree(entry.path, ignore_errors=True)
                 removed += 1
         except FileNotFoundError:
-            # Đã bị xóa bởi tiến trình/lần chạy khác giữa lúc scan và stat — bỏ qua.
-            continue
+            continue  # đã bị xóa bởi tiến trình khác giữa lúc scan và stat
 
     return removed
 
 
 # ---------------------------------------------------------------------------
-#   run_etl_bronze_to_silver
+# Bước 2-7 — run_etl_bronze_to_silver
 # ---------------------------------------------------------------------------
 
 
@@ -172,24 +167,23 @@ def _mark_failed(conn, s3_key: str, error_message: str) -> None:
 
 
 def _run_scd2_merge(conn) -> None:
-    """Chạy nguyên văn merge_scd2_listing_history.sql — file này đã tự bọc
-    BEGIN;...COMMIT; riêng, nên conn PHẢI ở chế độ autocommit=True để không bị lồng transaction
-    (psycopg2 mặc định tự mở transaction ngầm nếu autocommit=False)."""
+    """Chạy nguyên văn merge_scd2_listing_history.sql (Bước 6) — file này
+    tự bọc BEGIN;...COMMIT;, nên conn phải autocommit=True để không lồng
+    transaction."""
     sql_text = _MERGE_SCD2_SQL_PATH.read_text(encoding="utf-8")
     with conn.cursor() as cur:
         cur.execute(sql_text)
 
 def _truncate_staging_after_success(conn) -> None:
-    """Dọn silver.listing_staging_batch NGAY sau khi merge SCD2 thành công."""
+    """Dọn silver.listing_staging_batch ngay sau khi merge SCD2 thành công."""
     with conn.cursor() as cur:
         cur.execute("TRUNCATE silver.listing_staging_batch")
 
 
 def run_etl_bronze_to_silver(s3_key: str) -> None:
-    """Task 19 — điểm gọi duy nhất cho PythonOperator. Xử lý 1 file/lần gọi
-    (dynamic task mapping — mỗi file 1 Task Instance, retry riêng không kéo cả batch).
-    Vòng đời pipeline.bronze_file_state: pending -> processing -> done | failed;
-    lỗi ở bất kỳ bước nào -> đánh dấu failed + last_error rồi raise để Airflow tự retry."""
+    """Điểm gọi duy nhất cho PythonOperator, xử lý 1 file/lần gọi (dynamic
+    mapping — mỗi file 1 Task Instance, retry riêng không kéo cả batch).
+    Vòng đời bronze_file_state: pending -> processing -> done | failed."""
     t0 = time.perf_counter()
     conn = psycopg2.connect(get_postgres_dsn())
     conn.autocommit = True
@@ -203,8 +197,8 @@ def run_etl_bronze_to_silver(s3_key: str) -> None:
                 (s3_key,),
             )
 
-        # Tải file Bronze về local TRƯỚC khi khởi động Spark — tránh JVM
-        # chiếm CPU làm nghẽn download qua boto3.
+        # Tải Bronze về local trước khi khởi động Spark — tránh JVM chiếm
+        # CPU làm nghẽn download qua boto3.
         tmp_dir = download_bronze_file(s3_key)
         try:
             local_path = os.path.join(tmp_dir.name, os.path.basename(s3_key))
@@ -216,7 +210,7 @@ def run_etl_bronze_to_silver(s3_key: str) -> None:
             try:
                 t_read_start = time.perf_counter()
                 bronze_df = read_bronze_parquet(spark, local_path, s3_key)
-                n_rows = bronze_df.count()  # đã cache rồi nên count() gần như free, chỉ để log số dòng
+                n_rows = bronze_df.count()  # đã cache nên gần như free, chỉ để log
                 logger.info("[TIMING] read_bronze_parquet: %.1fs (%d dòng)",
                             time.perf_counter() - t_read_start, n_rows)
 
@@ -259,8 +253,8 @@ def run_etl_bronze_to_silver(s3_key: str) -> None:
         conn.close()
 
 def get_pending_s3_keys() -> list[str]:
-    """Lấy danh sách s3_key đang status='pending' trong pipeline.bronze_file_state,
-    dùng làm input cho .expand() của task run_etl_bronze_to_silver."""
+    """Danh sách s3_key status='pending', input cho .expand() của
+    run_etl_bronze_to_silver."""
     conn = psycopg2.connect(get_postgres_dsn())
     try:
         with conn.cursor() as cur:
@@ -274,11 +268,8 @@ def get_pending_s3_keys() -> list[str]:
 
 
 def reset_stuck_files() -> int:
-    """Reset file bị kẹt ở 'failed' (hết retry Airflow) hoặc 'processing' 
-    (task bị kill giữa chừng, chưa kịp update status) về lại 'pending'.
-
-    cur.rowcount ở đây tin cậy được vì là UPDATE đơn (không phải executemany).
-    """
+    """Reset file kẹt ở 'failed' (hết retry Airflow) hoặc 'processing'
+    (task bị kill giữa chừng) về 'pending'."""
     conn = psycopg2.connect(get_postgres_dsn())
     try:
         with conn:

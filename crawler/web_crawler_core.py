@@ -1,29 +1,22 @@
 """
 crawler/web_crawler_core.py
 
-Logic thuần Python cho vòng lặp crawl chính của DAG 2 (`crawl_alonhadat_web`).
-Mọi I/O (DB/HTTP/S3/Proxy) được inject qua Protocol → dễ unit test bằng fake/mock,
-không cần Airflow, Postgres hay mạng thật.
+Thành phần 2 (Web Crawler) — logic thuần cho vòng lặp crawl chính của DAG 2.
+Mọi I/O (DB/HTTP/S3/Proxy) inject qua Protocol, implement ở web_crawler_io.py.
 
-I/O thật nằm ở crawler/web_crawler_io.py.
-
-Vòng đời status của 1 URL trong detail_queue (xem sql/001_pipeline_schema.sql):
+Vòng đời status 1 URL trong detail_queue:
     pending -> processing -> fetched -> flushed -> done
                     |            |         |
                     +------------+---------+--> failed (hết retry/proxy)
+- fetched: đã có HTML, còn trong RAM.
+- flushed: đã ghi an toàn lên S3 (.inprogress), chưa chắc có bản final.
+- done:    đã trong file .parquet final -> Silver đọc được.
 
-- fetched: đã fetch HTML xong, đang chờ tới lượt flush lên S3 (chỉ có trong RAM).
-- flushed: đã ghi an toàn lên S3 (.inprogress), CHƯA CHẮC có bản final tương ứng.
-- done:    đã nằm trong file .parquet final -> Silver layer đọc được.
-
-Bảo vệ dữ liệu khi crash giữa chừng gồm 3 lớp:
-  1. try/finally quanh vòng lặp chính -> luôn cố flush final + finalize run_state
-     khi có exception Python (không bắt được SIGKILL/OOM).
-  2. update_run_progress() ghi incremental sau mỗi lần flush trung gian ->
-     run_state luôn khớp với dữ liệu thực đã lên S3, kể cả khi bị kill cứng.
-  3. _reconcile_crashed_runs() (Lớp 2) chạy đầu mỗi run kế tiếp -> promote
-     .inprogress của run đã chết (SIGKILL/OOM, try/finally không kịp chạy)
-     thành final nếu đã đạt min_success_pages, khôi phục cả detail_queue.
+Bảo vệ dữ liệu khi crash giữa chừng — 3 lớp:
+  1. try/finally quanh vòng lặp chính -> luôn cố flush final + finalize run_state.
+  2. update_run_progress() ghi incremental sau mỗi flush trung gian.
+  3. _reconcile_crashed_runs() (Bước 7) chạy đầu mỗi run kế tiếp -> promote
+     .inprogress của run đã chết thành final nếu đạt min_success_pages.
 """
 
 
@@ -58,19 +51,17 @@ PROPERTY_TYPES: tuple[str, ...] = (
     "phong-tro-nha-tro",
 )
 
+# Địa giới CŨ dùng để build URL nguồn web (site chưa cập nhật địa giới mới).
 PROVINCES: tuple[str, ...] = ("ho-chi-minh", "binh-duong", "ba-ria-vung-tau")
-# Địa phận CŨ dùng để build URL nguồn web (site chưa cập nhật theo
-# địa giới mới). Sau sáp nhập, Bình Dương + Bà Rịa Vũng Tàu thuộc TP.HCM
 
-# Các cụm từ để dò CAPTCHA (site trả HTTP 200 kèm trang xác minh, không có status riêng — B9).
+# Cụm từ dò CAPTCHA (site trả HTTP 200 kèm trang xác minh, không có status riêng).
 CAPTCHA_MARKERS: tuple[str, ...] = (
     "Tôi không phải người máy",
 )
 
 
 def all_listing_combinations() -> list[tuple[str, str, str]]:
-    """Sinh 30 tổ hợp (province_old, listing_type, property_type) cố định — dùng khi seed
-    hoặc daily-reset bảng listing_progress."""
+    """Sinh 30 tổ hợp (province_old, listing_type, property_type) cố định."""
     return [(pv, lt, pt) for pv in PROVINCES for lt in LISTING_TYPES for pt in PROPERTY_TYPES]
 
 
@@ -80,57 +71,41 @@ def all_listing_combinations() -> list[tuple[str, str, str]]:
 
 @dataclass(frozen=True)
 class CrawlerConfig:
-    """Cấu hình cho 1 lần chạy DAG 2. Có thể override khi test."""
+    """Cấu hình cho 1 lần chạy DAG 2."""
 
-    max_detail_pages_per_run: int = 1000   # số trang chi tiết tối đa
+    max_detail_pages_per_run: int = 1000
     time_box_seconds: int = 45 * 60        # ~45 phút, tránh đè run hourly
-    delay_min_seconds: float = 5.0         # delay khi dùng proxy
+    delay_min_seconds: float = 5.0
     delay_max_seconds: float = 10.0
 
-    # Retry cùng proxy khi FETCH_ERROR (lỗi mạng/server).
-    # Hết retry → dừng run ngay. PROXY_ISSUE (proxy chết/429/CAPTCHA)
-    # đổi proxy ngay, lặp tới khi hết pool.
+    # Retry cùng proxy khi FETCH_ERROR; hết lượt -> dừng run.
+    # PROXY_ISSUE đổi proxy ngay, lặp tới khi hết pool.
     max_fetch_error_retries: int = 3
 
-    flush_interval_seconds: int = 10 * 60  # flush mỗi 10 phút
-    flush_page_threshold: int = 100        # hoặc ~100 trang
+    flush_interval_seconds: int = 10 * 60
+    flush_page_threshold: int = 100
 
     min_success_pages: int = 10
 
 
 class StopReason(str, Enum):
-    """Lý do dừng 1 run DAG 2 (ghi vào run_state.stopped_reason).
-
-    - FETCH_ERROR: hết retry cùng proxy cho lỗi mạng/server → dừng ngay.
-    - PROXY_EXHAUSTED: hết proxy trong pool (kể cả sau 1 lần refill) khi gặp PROXY_ISSUE.
-    Cả hai vẫn có thể coi là thành công nếu đã đạt min_success_pages.
-    - CRASHED: exception Python không lường trước, bắt được nhờ try/finally
-      (KHÔNG bắt được SIGKILL/OOM — xem _reconcile_crashed_runs()).
-    - RECOVERED: run trước đó bị crash cứng (SIGKILL/OOM), được
-      _reconcile_crashed_runs() ở run sau khôi phục thành công (đã đạt
-      min_success_pages, promote .inprogress -> final thành công).
-    - INCOMPLETE: run trước đó bị crash cứng nhưng KHÔNG đủ điều kiện khôi
-      phục (chưa đạt min_success_pages, hoặc không tìm thấy .inprogress) —
-      dữ liệu (nếu có) coi như mất, chỉ đóng sổ run_state để không bị quét lại.
-    """
+    """Lý do dừng 1 run (ghi vào run_state.stopped_reason)."""
 
     MAX_PAGES = "max_pages"
     TIME_BOX = "time_box"
     NO_MORE_DATA = "no_more_data"
-    FETCH_ERROR = "fetch_error"
-    PROXY_EXHAUSTED = "proxy_exhausted"
-    CRASHED = "crashed"
-    RECOVERED = "recovered"
-    INCOMPLETE = "incomplete"
+    FETCH_ERROR = "fetch_error"           # hết retry cùng proxy
+    PROXY_EXHAUSTED = "proxy_exhausted"   # hết proxy pool kể cả sau refill
+    CRASHED = "crashed"                   # exception Python bắt được qua try/finally
+    RECOVERED = "recovered"               # Bước 7 khôi phục thành công run chết trước đó
+    INCOMPLETE = "incomplete"             # Bước 7 không đủ điều kiện khôi phục, đóng sổ
 
 
 class ErrorKind(str, Enum):
     """Phân loại kết quả fetch — quyết định retry hay đổi proxy ngay.
 
-    - PROXY_ISSUE: lỗi do proxy (chết/treo/quá tải) hoặc site chặn (429/CAPTCHA).
-      → đổi proxy ngay, không retry cùng proxy.
-    - FETCH_ERROR: lỗi mạng/server chung chung (5xx, request lạ).
-      → retry cùng proxy tối đa `max_fetch_error_retries`; hết lượt → dừng run (StopReason.FETCH_ERROR).
+    - PROXY_ISSUE: lỗi do proxy hoặc site chặn (429/CAPTCHA) -> đổi proxy ngay.
+    - FETCH_ERROR: lỗi mạng/server chung -> retry cùng proxy tối đa N lần.
     """
 
     OK = "ok"
@@ -140,13 +115,10 @@ class ErrorKind(str, Enum):
 
 @dataclass(frozen=True)
 class RunResult:
-    """Kết quả của WebCrawlerCore.run() — gồm số trang đã crawl.
-    Dùng cho run_dag2() quyết định thành công hay không,
-    ngay cả khi stop_reason bất thường (xem min_success_pages)."""
+    """Kết quả WebCrawlerCore.run()."""
 
     stop_reason: StopReason
     detail_pages_done: int
-
 
 @dataclass(frozen=True)
 class ListingTask:
@@ -158,7 +130,6 @@ class ListingTask:
     property_type: str
     page_to_crawl: int
 
-
 @dataclass(frozen=True)
 class DetailTask:
     """1 dòng detail_queue đã được claim, ưu tiên FIFO theo discovered_at."""
@@ -166,41 +137,36 @@ class DetailTask:
     queue_id: int
     url: str
 
-
 @dataclass(frozen=True)
 class FetchResult:
     """Kết quả 1 lần gọi HTTP — do web_crawler_io.py tạo, core chỉ phân loại."""
 
     status_code: Optional[int]              # None nếu timeout/connect-fail
     html: Optional[str] = None
-    error: Optional[str] = None             # mô tả lỗi kỹ thuật
-    is_proxy_error: bool = False            # True nếu lỗi rõ ràng do proxy
-    # ProxyError/SSLError/ConnectTimeout (không tunnel/handshake được)
-    # hoặc ReadTimeout (proxy treo, quá tải/băng thông kém).
-    # → coi là lỗi bản chất proxy, đổi proxy ngay (ErrorKind.PROXY_DEAD).
-
+    error: Optional[str] = None
+    is_proxy_error: bool = False
+    # True nếu ProxyError/SSLError/ConnectTimeout/ReadTimeout — lỗi bản chất
+    # proxy, đổi proxy ngay thay vì retry cùng proxy.
 
 @dataclass
 class BronzeRecord:
-    """1 dòng dữ liệu trang chi tiết đã fetch OK, chờ vào buffer tích luỹ.
-    Khớp schema chung với Nguồn 1 (CDN dataset): url / crawl_date / html."""
+    """1 dòng trang chi tiết đã fetch OK, chờ vào buffer.
+    Khớp schema chung với Dataset Loader: url / crawl_date / html."""
 
     url: str
     crawl_date: datetime
-    html: bytes   # LUÔN raw bytes, KHÔNG base64
-
+    html: bytes   # luôn raw bytes, không base64
 
 @dataclass(frozen=True)
 class PromotedFile:
-    """Kết quả promote .inprogress -> final (Lớp 2 - _reconcile_crashed_runs)."""
+    """Kết quả promote .inprogress -> final (Bước 7)."""
 
     final_key: str
     urls: list[str]
 
-
 @dataclass(frozen=True)
 class IncompleteRun:
-    """1 dòng run_state có ended_at IS NULL — ứng viên cho reconciliation."""
+    """1 dòng run_state có ended_at IS NULL — ứng viên cho Bước 7."""
 
     run_id: str
     started_at: datetime
@@ -208,7 +174,7 @@ class IncompleteRun:
 
 
 # ============================================================
-# 3. Hàm thuần (pure function) — parse HTML, không I/O thật
+# 3. Hàm thuần — parse HTML, không I/O thật
 # ============================================================
 
 def compute_listing_page_url(province_old: str, listing_type: str, property_type: str, page: int) -> str:
@@ -218,12 +184,12 @@ def compute_listing_page_url(province_old: str, listing_type: str, property_type
 
 
 def _normalize_url(href: str) -> str:
-    """Chuẩn hoá URL relative → absolute, tránh trùng khoá."""
+    """Chuẩn hoá URL relative -> absolute, tránh trùng khoá."""
     return urljoin(BASE_URL + "/", href)
 
 
 def extract_detail_urls(listing_html: str) -> list[str]:
-    """Trích URL chi tiết từ trang danh sách (B5)."""
+    """Trích URL chi tiết từ trang danh sách (Bước 4)."""
     soup = BeautifulSoup(listing_html, "lxml")
     urls: list[str] = []
     for article in soup.select("article.property-item"):
@@ -234,23 +200,22 @@ def extract_detail_urls(listing_html: str) -> list[str]:
 
 
 def is_pagination_end(listing_html: str) -> bool:
-    """Không còn article.property-item → hết trang (B7)."""
+    """Không còn article.property-item -> hết trang (Bước 4)."""
     soup = BeautifulSoup(listing_html, "lxml")
     return len(soup.select("article.property-item")) == 0
 
 
 def detect_captcha(html: str) -> bool:
-    """Dò dấu hiệu CAPTCHA trong HTML (status vẫn 200) (B9)."""
+    """Dò dấu hiệu CAPTCHA trong HTML (status vẫn 200)."""
     lowered = html.lower()
     return any(marker in lowered for marker in CAPTCHA_MARKERS)
 
 
 def classify_fetch_result(result: FetchResult) -> ErrorKind:
-    """Phân loại kết quả fetch:
-    - Proxy lỗi rõ ràng, 429, hoặc CAPTCHA → PROXY_ISSUE (đổi proxy ngay).
-    - Lỗi mạng/server chung chung (None, error, 5xx) → FETCH_ERROR (retry cùng proxy).
-    - 2xx không phải CAPTCHA → OK.
-    - 4xx khác (VD 404) → FETCH_ERROR.
+    """Phân loại kết quả fetch (Bước 3):
+    - Proxy lỗi rõ ràng, 429, hoặc CAPTCHA -> PROXY_ISSUE.
+    - Lỗi mạng/server chung (None, error, 5xx) -> FETCH_ERROR.
+    - 2xx không phải CAPTCHA -> OK. 4xx khác (VD 404) -> FETCH_ERROR.
     """
     if result.is_proxy_error:
         return ErrorKind.PROXY_ISSUE
@@ -268,12 +233,11 @@ def classify_fetch_result(result: FetchResult) -> ErrorKind:
 
 
 # ============================================================
-# 4. Protocol (interface) cho các thành phần I/O thật
-#    -> implement ở web_crawler_io.py, ở đây chỉ cần fake để test.
+# 4. Protocol cho các thành phần I/O thật (implement ở web_crawler_io.py)
 # ============================================================
 
 class ControlPlaneRepo(Protocol):
-    """Thao tác các bảng pipeline.listing_progress / detail_queue / run_state."""
+    """Thao tác pipeline.listing_progress / detail_queue / run_state."""
 
     def apply_daily_reset_if_needed(self, today: date) -> None: ...
     def reclaim_stale_detail_queue(self) -> int: ...
@@ -285,38 +249,31 @@ class ControlPlaneRepo(Protocol):
     def claim_detail_task(self) -> Optional[DetailTask]: ...
 
     def mark_detail_fetched(self, queue_id: int) -> None:
-        """processing -> fetched. Gọi ngay sau buffer.add() (HTML đã fetch
-        xong nhưng còn chỉ nằm trong RAM, chưa flush lên S3)."""
+        """processing -> fetched, gọi ngay sau buffer.add()."""
         ...
 
     def mark_details_flushed(self, queue_ids: Sequence[int]) -> None:
-        """fetched -> flushed. CHỈ gọi sau khi buffer.flush(final=False)
-        thành công (đã ghi an toàn lên S3 dưới dạng .inprogress)."""
+        """fetched -> flushed, sau buffer.flush(final=False) thành công."""
         ...
 
     def mark_details_done(self, queue_ids: Sequence[int]) -> None:
-        """fetched/flushed -> done. CHỈ gọi sau khi buffer.flush(final=True)
-        thành công (đã nằm trong file .parquet final)."""
+        """fetched/flushed -> done, sau buffer.flush(final=True) thành công."""
         ...
 
     def mark_urls_done(self, urls: Sequence[str]) -> None:
-        """Như mark_details_done() nhưng theo url — dùng cho Lớp 2
-        (_reconcile_crashed_runs), vì process reconciliation không còn giữ
-        list queue_id gốc của run đã chết, chỉ đọc lại được url từ parquet."""
+        """Như mark_details_done() nhưng theo url — dùng ở Bước 7
+        (reconciliation không còn giữ queue_id gốc, chỉ đọc lại url từ parquet)."""
         ...
 
     def mark_detail_failed(self, queue_id: int) -> None: ...
     def init_run_state(self, run_id: str) -> None: ...
 
     def update_run_progress(self, run_id: str, detail_pages_done: int) -> None:
-        """Cập nhật detail_pages_done incremental (không đụng ended_at/
-        stopped_reason) ngay sau mỗi lần flush trung gian — lưới an toàn
-        cho trường hợp bị kill cứng giữa 2 lần flush."""
+        """Cập nhật incremental sau mỗi flush trung gian — lưới an toàn khi bị kill cứng."""
         ...
 
     def list_incomplete_runs(self, older_than_seconds: int) -> list[IncompleteRun]:
-        """Lớp 2 — trả về các run_state có ended_at IS NULL và started_at
-        đã đủ cũ (chắc chắn không phải run hiện tại đang chạy)."""
+        """Bước 7 — run_state có ended_at IS NULL và started_at đã đủ cũ."""
         ...
 
     def finalize_run_state(
@@ -329,59 +286,49 @@ class ControlPlaneRepo(Protocol):
 
 
 class ProxyPool(Protocol):
-    """Quản lý proxy hiện tại và xoay vòng khi bị blocked (B12)."""
+    """Quản lý proxy hiện tại và xoay vòng khi bị chặn."""
 
     def current(self) -> Optional[str]: ...
     def rotate(self) -> Optional[str]: ...
     def mark_failed(self, proxy_url: str) -> None: ...
 
     def refill(self) -> int:
-        """Fetch + health-check proxy mới khi pool cạn.
-        Core chỉ gọi đúng 1 lần mỗi lần phát hiện cạn (xem _fetch_with_retry),
-        không gọi trong vòng lặp thường. Trả về số proxy sống lấy được (0 nếu không có)."""
+        """Fetch + health-check proxy mới khi pool cạn. Core chỉ gọi 1 lần
+        mỗi lần phát hiện cạn. Trả về số proxy sống lấy được."""
         ...
 
 
 class PageFetcher(Protocol):
-    """Thực hiện HTTP GET qua proxy — LUÔN trả FetchResult, không raise
-    exception (mọi lỗi kỹ thuật phải được bọc vào result.error)."""
+    """HTTP GET qua proxy — luôn trả FetchResult, không raise exception."""
 
     def fetch(self, url: str, proxy_url: Optional[str]) -> FetchResult: ...
 
 
 class BufferWriter(Protocol):
-    """Buffer tích luỹ trong bộ nhớ + flush lên S3 (B13/B14)."""
+    """Buffer tích luỹ trong bộ nhớ + flush lên S3 (Bước 5)."""
 
     def add(self, record: BronzeRecord) -> None: ...
 
     def flush(self, run_id: str, crawl_date: date, final: bool = False) -> Optional[str]:
-        """Flush buffer hiện có lên S3 key `.inprogress` (final=False) hoặc
-        đổi tên thành key chính thức (final=True). Trả về S3 key nếu có
-        flush thật, None nếu buffer rỗng."""
+        """Flush lên S3 key `.inprogress` (final=False) hoặc đổi tên thành
+        key chính thức (final=True). Trả None nếu buffer rỗng."""
         ...
 
     def promote_inprogress_to_final(
         self, run_id: str, crawl_date: date
     ) -> Optional[PromotedFile]:
-        """Lớp 2: đổi .inprogress của 1 run ĐÃ CHẾT thành final, đọc luôn
-        cột url trong đó để repo cập nhật detail_queue. Trả None nếu không
-        tìm thấy .inprogress lẫn final (run chết trước khi flush lần nào)."""
+        """Bước 7 — đổi .inprogress của run đã chết thành final, đọc url
+        trong đó để repo cập nhật detail_queue. None nếu không có gì để promote."""
         ...
 
     def delete_inprogress(self, run_id: str, crawl_date: date) -> None:
-        """Lớp 2: dọn .inprogress của 1 run ĐÃ CHẾT nhưng KHÔNG đủ điều kiện
-        promote (chưa đạt min_success_pages) — run_state đã finalize INCOMPLETE
-        nên sẽ không được xét lại lần nào nữa, phải dọn ngay tại đây, nếu
-        không file sẽ mồ côi vĩnh viễn (cleanup_orphaned_inprogress() không
-        đụng tới vì file này không có bản final tương ứng). Không tồn tại
-        thì bỏ qua êm, không log ồn (trường hợp bình thường: crash trước
-        khi kịp flush lần nào)."""
+        """Bước 7 — dọn .inprogress của run chết nhưng không đủ điều kiện
+        promote. Không tồn tại thì bỏ qua êm."""
         ...
 
 
 class Clock(Protocol):
-    """Bọc datetime.now()/time.monotonic()/sleep() để test không cần chờ
-    thật và không phụ thuộc múi giờ hệ thống."""
+    """Bọc datetime.now()/monotonic()/sleep() để test không phụ thuộc thời gian thật."""
 
     def now(self) -> datetime: ...
     def monotonic(self) -> float: ...
@@ -393,16 +340,11 @@ class Clock(Protocol):
 # ============================================================
 
 class WebCrawlerCore:
-    """Điều phối DAG 2 (mục 6).
-    Không tự tạo DB/HTTP/S3 — mọi phụ thuộc inject qua constructor để dễ unit test."""
+    """Điều phối toàn bộ vòng lặp crawl DAG 2. Mọi phụ thuộc inject qua
+    constructor để dễ unit test."""
 
-    # Ngưỡng coi 1 run là "chắc chắn đã chết" cho reconciliation (Lớp 2).
-    # Dùng chung giá trị với threshold của reclaim_stale_detail_queue() (2 giờ)
-    # — 2 giờ (thay vì đúng 1 chu kỳ hourly) để chừa dư buffer cho tình huống
-    # Celery/Redis redeliver task (visibility_timeout, xem error_log.md —
-    # task "pause" ~1 giờ rồi tự resume) hoặc run đang retry/đổi proxy kéo dài
-    # hợp lệ (_fetch_with_retry không bị chặn bởi time_box giữa các lần retry).
-    # Tránh reclaim/reconcile oan 1 run vẫn đang thực sự sống.
+    # Ngưỡng coi 1 run là "chắc chắn đã chết" cho Bước 7 — 2 giờ, chừa dư
+    # buffer cho Celery/Redis redeliver task hoặc retry/đổi proxy kéo dài hợp lệ.
     RECONCILE_STALE_RUN_AFTER_SECONDS = 2 * 60 * 60
 
     def __init__(
@@ -426,17 +368,12 @@ class WebCrawlerCore:
     # -------- entrypoint gọi từ Airflow PythonOperator --------
 
     def run(self, run_id: str) -> RunResult:
-        """Chạy 1 lần DAG 2, trả về RunResult (lý do dừng + số trang crawl).
-
-        'done' trong detail_queue chỉ được ghi SAU KHI dữ liệu đã flush
-        thành công lên S3 (fetched -> flushed -> done), đảm bảo
-        detail_queue/run_state luôn khớp với dữ liệu thực tế trên S3.
-        """
+        """Chạy 1 lần DAG 2. 'done' trong detail_queue chỉ ghi SAU KHI dữ
+        liệu đã flush thành công lên S3 (fetched -> flushed -> done)."""
         today = self.clock.now().date()
 
-        # Lớp 2: khôi phục run bị SIGKILL/OOM (try/finally không kịp chạy)
-        # TRƯỚC KHI động tới detail_queue của run hiện tại — để các dòng
-        # 'flushed' thuộc run vừa khôi phục không bị reclaim giật oan.
+        # Bước 7 chạy TRƯỚC KHI động tới detail_queue của run hiện tại — để
+        # các dòng 'flushed' thuộc run vừa khôi phục không bị reclaim oan.
         self._reconcile_crashed_runs()
 
         self.repo.apply_daily_reset_if_needed(today)
@@ -447,9 +384,9 @@ class WebCrawlerCore:
         last_flush_monotonic = start_monotonic
         detail_pages_done = 0
         pages_since_flush = 0
-        early_flush_done = False  # đã flush sớm khi đạt min_success_pages lần đầu chưa
-        # Toàn bộ queue_id đã fetch trong run này — KHÔNG bao giờ clear, vì
-        # buffer.flush() mỗi lần đều re-serialize toàn bộ buffer tích luỹ từ đầu run.
+        early_flush_done = False
+        # Không bao giờ clear — buffer.flush() mỗi lần re-serialize toàn bộ
+        # buffer tích luỹ từ đầu run.
         all_fetched_queue_ids: list[int] = []
 
         stop_reason: Optional[StopReason] = None
@@ -485,7 +422,7 @@ class WebCrawlerCore:
                 self._sleep_between_requests()
 
                 if not early_flush_done and detail_pages_done >= self.config.min_success_pages:
-                    # Flush sớm ngay khi đạt min_success_pages để bảo vệ dữ liệu nếu run dừng bất thường.
+                    # Flush sớm ngay khi đạt min_success_pages, bảo vệ dữ liệu nếu run dừng bất thường.
                     self._flush_and_mark(
                         run_id, today, all_fetched_queue_ids, detail_pages_done, final=False
                     )
@@ -493,7 +430,6 @@ class WebCrawlerCore:
                     pages_since_flush = 0
                     early_flush_done = True
                 else:
-                    # Flush định kỳ theo interval/page threshold.
                     since_flush = self.clock.monotonic() - last_flush_monotonic
                     if (
                         since_flush >= self.config.flush_interval_seconds
@@ -508,8 +444,7 @@ class WebCrawlerCore:
             stop_reason = StopReason.CRASHED
             raise
         finally:
-            # Kết thúc run: flush cuối + mark done. Bọc riêng try/except để lỗi ở
-            # đây (VD S3 tạm thời lỗi) KHÔNG che mất exception gốc (nếu có) từ vòng lặp trên.
+            # Bọc riêng try/except để lỗi ở đây không che mất exception gốc.
             try:
                 output_key = self._flush_and_mark(
                     run_id, today, all_fetched_queue_ids, detail_pages_done, final=True
@@ -522,7 +457,7 @@ class WebCrawlerCore:
 
         return RunResult(stop_reason=stop_reason, detail_pages_done=detail_pages_done)
 
-    # -------- flush + mark status tương ứng --------
+    # -------- flush + mark status tương ứng (Bước 5) --------
 
     def _flush_and_mark(
         self,
@@ -532,11 +467,9 @@ class WebCrawlerCore:
         detail_pages_done: int,
         final: bool,
     ) -> Optional[str]:
-        """Flush buffer lên S3. Chỉ khi flush thành công (key khác None):
-          - final=False -> mark 'flushed' (an toàn trên S3, chưa phải file final)
-          - final=True  -> mark 'done'    (đã trong file final, Silver đọc được)
-        Luôn mark TOÀN BỘ all_fetched_queue_ids (không chỉ batch mới), vì
-        buffer.flush() mỗi lần đều re-serialize toàn bộ buffer tích luỹ từ đầu run."""
+        """final=False -> mark 'flushed'; final=True -> mark 'done'.
+        Luôn mark toàn bộ all_fetched_queue_ids vì buffer.flush() mỗi lần
+        re-serialize toàn bộ buffer tích luỹ từ đầu run."""
         output_key = self.buffer.flush(run_id, crawl_date, final=final)
         if output_key is not None and all_fetched_queue_ids:
             if final:
@@ -546,15 +479,12 @@ class WebCrawlerCore:
             self.repo.update_run_progress(run_id, detail_pages_done)
         return output_key
 
-    # -------- Lớp 2: reconciliation cho run bị SIGKILL/OOM --------
+    # -------- Bước 7: phục hồi run bị SIGKILL/OOM --------
 
     def _reconcile_crashed_runs(self) -> None:
-        """Tìm các run_state có ended_at IS NULL và đã đủ cũ (chắc chắn chết,
-        không phải đang chạy). Với run đã đạt min_success_pages -> promote
-        .inprogress thành final + mark URL tương ứng 'done'. Ngược lại chỉ
-        đóng sổ (INCOMPLETE) để không bị quét lại vô hạn; dữ liệu (nếu có)
-        coi như mất, các dòng detail_queue liên quan sẽ tự về 'pending' qua
-        reclaim_stale_detail_queue() chạy ngay sau bước này."""
+        """Run đạt min_success_pages -> promote .inprogress thành final +
+        mark URL 'done'. Không đủ -> đóng sổ INCOMPLETE, dữ liệu coi như
+        mất, detail_queue liên quan tự về 'pending' qua reclaim_stale_detail_queue()."""
         incomplete_runs = self.repo.list_incomplete_runs(
             older_than_seconds=self.RECONCILE_STALE_RUN_AFTER_SECONDS
         )
@@ -575,9 +505,6 @@ class WebCrawlerCore:
                     incomplete.run_id, incomplete.detail_pages_done, len(promoted.urls),
                 )
             else:
-                # Không đủ điều kiện (hoặc không có gì để promote) -> đóng sổ
-                # INCOMPLETE, đồng thời dọn luôn .inprogress mồ côi (nếu có) vì
-                # run này sẽ không bao giờ được xét lại (đã finalize).
                 self.buffer.delete_inprogress(incomplete.run_id, crawl_date)
                 self.repo.finalize_run_state(
                     incomplete.run_id, StopReason.INCOMPLETE,
@@ -585,12 +512,11 @@ class WebCrawlerCore:
                 )
                 logger.warning(
                     "Reconciliation: run_id=%s không đủ điều kiện khôi phục "
-                    "(%d trang < %d tối thiểu, hoặc không tìm thấy .inprogress) -> coi là mất, "
-                    "đã dọn .inprogress mồ côi (nếu có)",
+                    "(%d trang < %d tối thiểu) -> coi là mất, đã dọn .inprogress mồ côi",
                     incomplete.run_id, incomplete.detail_pages_done, self.config.min_success_pages,
                 )
 
-    # -------- xử lý 1 trang chi tiết --------
+    # -------- Bước 5: xử lý 1 trang chi tiết --------
 
     def _process_detail_task(self, task: DetailTask) -> Optional[StopReason]:
         result, stop_reason = self._fetch_with_retry(task.url)
@@ -606,13 +532,12 @@ class WebCrawlerCore:
             html=result.html.encode("utf-8"),
         )
         self.buffer.add(record)
-        # KHÔNG mark 'done' ở đây — dời sang _flush_and_mark(), chỉ mark 'done'
-        # SAU KHI dữ liệu đã flush thành công lên S3 (final). Ở đây chỉ đánh
-        # dấu 'fetched': đã có HTML nhưng còn chỉ nằm trong RAM.
+        # Chỉ mark 'fetched' ở đây — 'done' dời sang _flush_and_mark(),
+        # sau khi dữ liệu đã flush thành công lên S3.
         self.repo.mark_detail_fetched(task.queue_id)
         return None
 
-    # -------- xử lý 1 trang danh sách --------
+    # -------- Bước 4: xử lý 1 trang danh sách --------
 
     def _process_listing_task(
         self, task: ListingTask, crawl_date: date
@@ -634,22 +559,20 @@ class WebCrawlerCore:
         self.repo.enqueue_detail_urls(urls, task.progress_id, crawl_date)
         return None
 
-    # -------- fetch dùng chung listing/detail, kèm retry (B4/B9-B12) --------
+    # -------- Bước 2-3: fetch dùng chung listing/detail, kèm retry --------
 
     def _fetch_with_retry(self, url: str) -> tuple[FetchResult, Optional[StopReason]]:
-        """Trả (result, stop_reason).
-        stop_reason=None nghĩa là fetch OK; khác None thì dừng run.
+        """stop_reason=None nghĩa là fetch OK; khác None thì dừng run.
 
         Luật retry:
           - PROXY_ISSUE: đổi proxy ngay, lặp tới khi hết proxy (-> PROXY_EXHAUSTED).
-          - FETCH_ERROR: retry cùng proxy tối đa `max_fetch_error_retries`; hết lượt -> dừng run.
+          - FETCH_ERROR: retry cùng proxy tối đa max_fetch_error_retries; hết lượt -> dừng run.
 
-        Quy tắc proxy:
-          - Không bao giờ fetch bằng IP thật (proxy=None).
-          - Khi pool cạn: refill đúng 1 lần; nếu vẫn cạn -> PROXY_EXHAUSTED.
+        Quy tắc proxy: không bao giờ fetch bằng IP thật. Pool cạn -> refill
+        đúng 1 lần; vẫn cạn -> PROXY_EXHAUSTED.
         """
         same_proxy_attempts = 0
-        already_refilled = False  # chỉ refill 1 lần cho mỗi lần cạn trong lượt gọi này
+        already_refilled = False
 
         while True:
             proxy = self.proxy_pool.current()
@@ -663,7 +586,7 @@ class WebCrawlerCore:
                     )
                 already_refilled = True
                 same_proxy_attempts = 0
-                continue  # vừa refill() thành công -> lấy proxy mới ở vòng lặp kế
+                continue
 
             result = self.fetcher.fetch(url, proxy)
             kind = classify_fetch_result(result)
@@ -674,11 +597,10 @@ class WebCrawlerCore:
             if kind is ErrorKind.FETCH_ERROR:
                 same_proxy_attempts += 1
                 if same_proxy_attempts < self.config.max_fetch_error_retries:
-                    continue  # còn lượt -> retry CÙNG proxy
-                # Hết ngân sách retry cùng proxy -> DỪNG RUN NGAY, không đổi proxy
+                    continue
                 return result, StopReason.FETCH_ERROR
 
-            # kind is ErrorKind.PROXY_ISSUE (proxy chết/treo/429/CAPTCHA)
+            # kind is ErrorKind.PROXY_ISSUE
             self.proxy_pool.mark_failed(proxy)
             same_proxy_attempts = 0
 
@@ -688,10 +610,9 @@ class WebCrawlerCore:
                 if stop_reason is not None:
                     return result, stop_reason
                 already_refilled = True
-            # lặp lại vòng while với proxy mới (từ rotate() hoặc từ refill())
 
     def _handle_pool_exhausted(self, already_refilled: bool) -> Optional[StopReason]:
-        """Pool hết proxy: refill đúng 1 lần; nếu vẫn cạn -> PROXY_EXHAUSTED."""
+        """Pool hết proxy: refill đúng 1 lần; vẫn cạn -> PROXY_EXHAUSTED."""
         if already_refilled:
             return StopReason.PROXY_EXHAUSTED
         new_count = self.proxy_pool.refill()

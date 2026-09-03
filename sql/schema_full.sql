@@ -1,8 +1,14 @@
 -- ============================================================================
 -- sql/schema_full.sql
--- DDL hợp nhất toàn bộ database real_estate_dw.
+-- DDL hợp nhất toàn bộ database real_estate_dw (gộp từ 6 file 001-006).
 -- Thứ tự: pipeline (control-plane) -> silver (SCD2) -> gold (star schema).
 -- Idempotent: CREATE ... IF NOT EXISTS, chạy lại an toàn trên DB rỗng.
+--
+-- Thay đổi so với bản gốc (đã thống nhất):
+--   - Bỏ silver.listing_history.crawl_date (trùng giá trị valid_from mọi dòng)
+--   - Bỏ gold.dim_date.day/month/quarter/year (không dùng, dashboard tự DATE_TRUNC)
+--   - Bỏ idx_listing_history_id_current (trùng ux_listing_history_current)
+-- => Phải chạy kèm bản vá merge_scd2_listing_history.sql + etl_silver_to_gold.sql.
 -- ============================================================================
 
 -- ============================================================================
@@ -369,7 +375,6 @@ CREATE TABLE gold.dim_property_features (
 CREATE TABLE gold.fact_listing_price (
     listing_key       BIGINT        PRIMARY KEY,   -- map thẳng silver.listing_history.listing_key
     listing_id         BIGINT        NOT NULL,       -- degenerate dimension, trace về Silver/Bronze
-    listing_url         TEXT          NOT NULL,
 
     location_key         BIGINT   NOT NULL REFERENCES gold.dim_location (location_key),
     property_type_key     BIGINT   NOT NULL REFERENCES gold.dim_property_type (property_type_key),
@@ -442,7 +447,7 @@ ON CONFLICT (ward_new) DO NOTHING;
 -- Chuẩn hóa Unicode NFC 2 chiều khi so khớp GeoJSON (tránh lệch NFC/NFD).
 CREATE OR REPLACE VIEW gold.vw_fact_report AS
 SELECT
-    f.listing_key, f.listing_id, f.listing_url,
+    f.listing_key, f.listing_id,
     f.price_vnd, f.price_per_m2_vnd, f.area_m2, f.bedrooms, f.floors,
     f.length_m, f.width_m, f.street_width_m,
     f.price_is_negotiable, f.price_is_outlier, f.area_is_undetermined, f.area_is_outlier,

@@ -1,18 +1,11 @@
 """
 dags/dataset_loader.py
 
-DAG 1 — tải 77 part cố định (part1..part77.parquet) từ CDN dataset lên S3
-(Bronze layer), theo control-plane pipeline.dataset_part_state.
+Thành phần 1 — DAG 1: tải 77 part cố định từ CDN dataset lên S3 (Bronze),
+theo control-plane pipeline.dataset_part_state.
 
-File này CHỈ khai báo lịch chạy/retry — logic nghiệp vụ nằm ở
-crawler/dataset_loader_core.py (thuần) và crawler/dataset_loader_io.py (I/O thật).
-Dùng TaskFlow API (`@task`/`.expand()`) áp thẳng lên 2 hàm có sẵn, không viết
-hàm bọc thêm.
-
-Task 2 (`process_one_part`) dynamic-mapped: mỗi part là 1 Task Instance
-riêng, lỗi part nào không ảnh hưởng part khác. Không tự viết retry loop —
-dựa vào retries/retry_delay của Airflow (quyết định D1). Khác Nhóm B: CDN
-ổn định, không proxy/CAPTCHA/rate-limit -> không cần state machine phức tạp.
+File này chỉ khai báo lịch chạy/retry — logic nghiệp vụ nằm ở
+crawler/dataset_loader_core.py (thuần) và crawler/dataset_loader_io.py (I/O).
 """
 
 from __future__ import annotations
@@ -33,8 +26,6 @@ default_args = {
     "owner": "phuong",
     "retries": 2,
     "retry_delay": timedelta(minutes=2),
-    # CDN ổn định hơn hẳn alonhadat.com.vn (không proxy/CAPTCHA/rate-limit)
-    # -> retry_delay ngắn hơn Nhóm B (5 phút) là đủ.
 }
 
 with DAG(
@@ -47,11 +38,10 @@ with DAG(
     default_args=default_args,
     tags=["bronze", "crawler", "dataset", "dag1"],
 ) as dag:
-    # Task 1 (không mapped) — trả về list[part_number] cần xử lý, dùng
-    # trực tiếp làm input cho .expand() của Task 2.
+    # Bước 1 (không mapped) — trả về list[part_number] cần xử lý.
     compute_parts = task(task_id="compute_parts_to_process")(compute_parts_to_process_task)
 
-    # Task 2 (mapped) — giới hạn đồng thời để tránh tạo burst request lên CDN.
+    # Bước 2-4 (mapped) — giới hạn đồng thời tránh burst request lên CDN.
     process_part = task(
         task_id="process_one_part",
         max_active_tis_per_dag=config.DATASET_MAX_ACTIVE_TASKS,

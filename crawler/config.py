@@ -1,10 +1,8 @@
 """
 crawler/config.py
 
-Cấu hình riêng cho crawler (Nhóm A + B, DAG 1 & 2).
-Tham số chung (DSN Postgres, S3, AWS region, RUNNING_IN_CONTAINER)
-import từ config.py gốc — không định nghĩa lại.
-Các module I/O trong crawler/ import từ đây, core chỉ nhận CrawlerConfig.
+Thành phần 1+2 — cấu hình riêng cho crawler (Dataset Loader + Web Crawler).
+Tham số chung (DSN Postgres, S3, AWS region) import từ config.py gốc.
 """
 
 import importlib.util
@@ -12,7 +10,6 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Luôn tìm .env ở project root (2 cấp trên), không phụ thuộc cwd
 _ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=_ENV_PATH)
 
@@ -52,15 +49,15 @@ PROXY_HEALTH_CHECK_TIMEOUT_SECONDS = _float("PROXY_HEALTH_CHECK_TIMEOUT_SECONDS"
 PROXY_HEALTH_CHECK_WORKERS = _int("PROXY_HEALTH_CHECK_WORKERS", 20)
 PROXY_MAX_CANDIDATES = _int("PROXY_MAX_CANDIDATES", 200)
 
-# Tham số riêng cho bước lấy danh sách proxy thô, tách khỏi timeout cho health-check ở trên.
+# Tham số riêng cho bước lấy danh sách proxy thô, tách khỏi timeout health-check.
 PROXYSCRAPE_TIMEOUT_SECONDS = _float("PROXYSCRAPE_TIMEOUT_SECONDS", 15.0)
 PROXYSCRAPE_LIMIT = _int("PROXYSCRAPE_LIMIT", 500)
 GEONODE_TIMEOUT_SECONDS = _float("GEONODE_TIMEOUT_SECONDS", 15.0)
 GEONODE_LIMIT = _int("GEONODE_LIMIT", 100)
 
-# Crawl loop (Nhóm B, DAG 2)
+# Crawl loop (Thành phần 2, DAG 2)
 WEB_CRAWLER_MAX_DETAIL_PAGES_PER_RUN = _int("WEB_CRAWLER_MAX_DETAIL_PAGES_PER_RUN", 1000)
-# 45 phút — chừa buffer ~20 phút cho DAG 3+4 chạy xong trong cùng giờ (DAG 2 @hourly tự trigger tiếp DAG 3->4).
+# 45 phút — chừa buffer ~20 phút cho DAG 3+4 chạy xong trong cùng giờ.
 WEB_CRAWLER_TIME_BOX_SECONDS = _int("WEB_CRAWLER_TIME_BOX_SECONDS", 45 * 60)
 WEB_CRAWLER_DELAY_MIN_SECONDS = _float("WEB_CRAWLER_DELAY_MIN_SECONDS", 5.0)
 WEB_CRAWLER_DELAY_MAX_SECONDS = _float("WEB_CRAWLER_DELAY_MAX_SECONDS", 10.0)
@@ -69,7 +66,7 @@ WEB_CRAWLER_FLUSH_INTERVAL_SECONDS = _int("WEB_CRAWLER_FLUSH_INTERVAL_SECONDS", 
 WEB_CRAWLER_FLUSH_PAGE_THRESHOLD = _int("WEB_CRAWLER_FLUSH_PAGE_THRESHOLD", 100)
 WEB_CRAWLER_MIN_SUCCESS_PAGES = _int("WEB_CRAWLER_MIN_SUCCESS_PAGES", 10)
 
-# Dataset loader (Nhóm A, DAG 1)
+# Dataset loader (Thành phần 1, DAG 1)
 DATASET_CDN_BASE_URL = os.getenv(
     "DATASET_CDN_BASE_URL", "https://cdn.cuhuuhoang.com/alonhadat"
 )

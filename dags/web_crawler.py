@@ -1,31 +1,19 @@
 """
 dags/web_crawler.py
 
-DAG 2 — crawl trực tiếp alonhadat.com.vn theo control-plane
-pipeline.listing_progress / pipeline.detail_queue.
+Thành phần 2 — DAG 2: crawl trực tiếp alonhadat.com.vn theo control-plane
+pipeline.listing_progress / detail_queue.
 
-File này CHỈ khai báo lịch chạy/retry — logic nghiệp vụ nằm ở
-crawler/web_crawler_core.py (thuần), crawler/web_crawler_io.py (I/O thật),
-crawler/proxy_manager.py (proxy). `run_dag2()` là điểm gọi duy nhất, tự
-raise RuntimeError khi stop_reason bất thường để Airflow retry.
+File này chỉ khai báo lịch chạy/retry — logic nghiệp vụ nằm ở
+crawler/web_crawler_core.py, crawler/web_crawler_io.py, crawler/proxy_manager.py.
 
-TỰ ĐỘNG HÓA: task cuối `trigger_bronze_to_silver` nối sang DAG 3, DAG 3 tự
-nối sang DAG 4 — cả chuỗi crawl -> Silver -> Gold chạy tự động mỗi giờ chỉ
-từ 1 lịch @hourly duy nhất ở đây. DAG 1 (dataset_loader) đứng ngoài chuỗi,
-trigger tay khi cần.
+Task cuối `trigger_bronze_to_silver` nối sang DAG 3, DAG 3 tự nối sang
+DAG 4 — cả chuỗi crawl -> Silver -> Gold chạy tự động mỗi giờ chỉ từ 1
+lịch @hourly duy nhất ở đây. DAG 1 đứng ngoài chuỗi, trigger tay khi cần.
 
-`wait_for_completion=True` + `deferrable=True`: task này chờ cả DAG 3+4
-chạy xong mới DONE, nhờ đó `max_active_runs=1` tự ngăn 2 chu kỳ hourly
-chồng nhau. `deferrable=True` giải phóng worker slot trong lúc chờ (qua
-airflow-triggerer) — quan trọng vì Spark ở DAG 3 cũng cần slot riêng.
-
-KHÔI PHỤC RUN BỊ CRASH CỨNG (SIGKILL/OOM): mỗi lần `run_dag2()` chạy, TỰ
-ĐỘNG rà `pipeline.run_state` tìm run trước đó bị treo (`ended_at IS NULL`,
-`started_at` quá 2 giờ) — nếu đã crawl đủ `min_success_pages`, promote
-`.inprogress` của run đó thành file final + khôi phục `detail_queue`; nếu
-không đủ, đóng sổ (`INCOMPLETE`) và dọn `.inprogress` mồ côi tương ứng.
-Cơ chế này nằm trong `WebCrawlerCore._reconcile_crashed_runs()`
-(crawler/web_crawler_core.py), DAG này không cần biết/gọi gì thêm.
+`wait_for_completion=True` + `deferrable=True`: chờ DAG 3+4 xong mới DONE
+(nhờ đó `max_active_runs=1` tự ngăn 2 chu kỳ hourly chồng nhau), đồng thời
+giải phóng worker slot trong lúc chờ.
 """
 
 from __future__ import annotations
@@ -43,8 +31,6 @@ default_args = {
     "owner": "phuong",
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
-    # Không retry_exponential_backoff — 429/CAPTCHA thường không tự hết
-    # trong vài phút, cố định 5 phút đơn giản và đủ dùng cho quy mô đồ án.
 }
 
 with DAG(
@@ -52,26 +38,20 @@ with DAG(
     description="DAG 2 - crawl trực tiếp alonhadat.com.vn, tự động nối sang DAG 3 -> DAG 4",
     schedule="@hourly",
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Ho_Chi_Minh"),
-    catchup=False,           # không chạy bù các giờ đã qua khi mới bật DAG
-    max_active_runs=1,       # concurrency luôn = 1 — KHÔNG cho 2 run hourly chồng nhau
+    catchup=False,
+    max_active_runs=1,
     default_args=default_args,
     tags=["bronze", "crawler", "web", "dag2"],
 ) as dag:
     crawl_web_detail_pages = PythonOperator(
         task_id="crawl_web_detail_pages",
         python_callable=run_dag2,
-        # Truyền run_id của chính DAG run vào crawler -> pipeline.run_state.run_id
-        # khớp trực tiếp với Airflow UI, dễ truy vết khi debug.
+        # run_id của chính DAG run -> khớp trực tiếp pipeline.run_state.run_id.
         op_kwargs={"run_id": "{{ run_id }}"},
     )
 
-    # trigger_run_id="{{ run_id }}" — dùng LUÔN run_id của chính DAG 2 run này
-    # đặt tên cho DAG run bên DAG 3 -> dễ truy vết trong Airflow UI: cùng
-    # 1 run_id string xuất hiện ở cả DAG 2/3/4 nghĩa là cùng 1 chu kỳ hourly.
-    # allowed_states/failed_states KHÔNG truyền tay — mặc định của
-    # TriggerDagRunOperator là allowed_states=[success], failed_states=[failed],
-    # đã đúng ý: DAG 3 fail -> task này fail -> DAG 2 run bị đánh FAILED,
-    # KHÔNG trigger tiếp bước sau (trigger_rule mặc định all_success).
+    # trigger_run_id dùng lại run_id của DAG 2 -> cùng 1 chu kỳ hourly có
+    # 1 run_id xuyên suốt DAG 2/3/4, dễ truy vết trên Airflow UI.
     trigger_bronze_to_silver = TriggerDagRunOperator(
         task_id="trigger_bronze_to_silver",
         trigger_dag_id="bronze_to_silver",
