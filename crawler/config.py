@@ -24,6 +24,13 @@ def _float(name: str, default: float) -> float:
     return float(raw) if raw else default
 
 
+def _require(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Thiếu biến môi trường: {name}")
+    return value
+
+
 # Import config gốc qua đường dẫn tuyệt đối (tránh phụ thuộc PYTHONPATH/cwd)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ROOT_CONFIG_PATH = _PROJECT_ROOT / "config.py"
@@ -67,9 +74,7 @@ WEB_CRAWLER_FLUSH_PAGE_THRESHOLD = _int("WEB_CRAWLER_FLUSH_PAGE_THRESHOLD", 100)
 WEB_CRAWLER_MIN_SUCCESS_PAGES = _int("WEB_CRAWLER_MIN_SUCCESS_PAGES", 10)
 
 # Dataset loader (Thành phần 1, DAG 1)
-DATASET_CDN_BASE_URL = os.getenv(
-    "DATASET_CDN_BASE_URL", "https://cdn.cuhuuhoang.com/alonhadat"
-)
+DATASET_CDN_BASE_URL = _require("DATASET_CDN_BASE_URL")
 DATASET_S3_PREFIX = os.getenv("DATASET_S3_PREFIX", "bronze/dataset/")
 DATASET_PROBE_TIMEOUT_SECONDS = _float("DATASET_PROBE_TIMEOUT_SECONDS", 20.0)
 DATASET_DOWNLOAD_TIMEOUT_SECONDS = _float("DATASET_DOWNLOAD_TIMEOUT_SECONDS", 60.0)
