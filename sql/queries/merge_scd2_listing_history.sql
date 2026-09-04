@@ -152,9 +152,7 @@ FROM scd2_change_points;
 
 -- ----------------------------------------------------------------------
 -- Bước 3: cập nhật last_seen_at cho các listing_id KHÔNG đổi hash trong
--- batch (đúng nguyên tắc "duplicate trong Silver = bug" -> không insert
--- version mới, chỉ xác nhận lần crawl gần nhất). Đây cũng là bằng chứng
--- duy nhất khiến is_reconfirmed=TRUE ở Gold (last_seen_at > valid_from).
+-- batch (không insert version mới, chỉ xác nhận lần crawl gần nhất).
 -- ----------------------------------------------------------------------
 UPDATE silver.listing_history h
 SET last_seen_at = s.max_crawl_date

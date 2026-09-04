@@ -44,9 +44,7 @@ WHERE pt.property_type_key IS NULL
 
 UNION ALL
 
--- 3. Có bao nhiêu dòng Silver không khớp được gold.dim_source? (thường do
---    source_bronze_key không khớp prefix 'bronze/dataset/' hay 'bronze/web/'
---    nào — xem cột sample_unmatched_prefix để biết prefix thật đang là gì)
+-- 3. Có bao nhiêu dòng Silver không khớp được gold.dim_source? 
 SELECT
     'dim_source' AS join_target,
     COUNT(*) AS orphan_count,
@@ -88,21 +86,3 @@ JOIN gold.dim_source src
     END
    AND src.source_part = h.source_part;
 
--- ----------------------------------------------------------------------
--- Nếu (1)/(2)/(3) đều = 0 nhưng fact_listing_price vẫn 0 dòng: kiểm tra 2
--- khả năng phổ biến (lỗi vận hành/schema-drift, không phải lỗi JOIN):
---
--- a) Xác nhận gold.dim_location/fact_listing_price có đúng cột mới
---    (province_new, price_is_outlier, observed_date_key) — nếu lệch, DB
---    đang chạy bản 005_gold_schema.sql cũ, phải DROP SCHEMA gold CASCADE
---    rồi chạy lại bản mới:
---
---       SELECT column_name FROM information_schema.columns
---       WHERE table_schema='gold' AND table_name='dim_location' ORDER BY column_name;
---
---       SELECT column_name FROM information_schema.columns
---       WHERE table_schema='gold' AND table_name='fact_listing_price' ORDER BY column_name;
---
--- b) Xác nhận parser/silver_to_gold_io.py đọc đúng file (_ETL_SQL_PATH trỏ
---    đúng sql/queries/etl_silver_to_gold.sql, không phải bản cache cũ).
--- ----------------------------------------------------------------------

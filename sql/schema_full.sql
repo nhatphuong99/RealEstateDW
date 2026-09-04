@@ -3,12 +3,6 @@
 -- DDL hợp nhất toàn bộ database real_estate_dw (gộp từ 6 file 001-006).
 -- Thứ tự: pipeline (control-plane) -> silver (SCD2) -> gold (star schema).
 -- Idempotent: CREATE ... IF NOT EXISTS, chạy lại an toàn trên DB rỗng.
---
--- Thay đổi so với bản gốc (đã thống nhất):
---   - Bỏ silver.listing_history.crawl_date (trùng giá trị valid_from mọi dòng)
---   - Bỏ gold.dim_date.day/month/quarter/year (không dùng, dashboard tự DATE_TRUNC)
---   - Bỏ idx_listing_history_id_current (trùng ux_listing_history_current)
--- => Phải chạy kèm bản vá merge_scd2_listing_history.sql + etl_silver_to_gold.sql.
 -- ============================================================================
 
 -- ============================================================================
