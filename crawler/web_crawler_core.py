@@ -86,6 +86,7 @@ class CrawlerConfig:
     flush_page_threshold: int = 100
 
     min_success_pages: int = 10
+    reconcile_stale_run_after_seconds: int = 2 * 60 * 60
 
 
 class StopReason(str, Enum):
@@ -240,7 +241,7 @@ class ControlPlaneRepo(Protocol):
     """Thao tác pipeline.listing_progress / detail_queue / run_state."""
 
     def apply_daily_reset_if_needed(self, today: date) -> None: ...
-    def reclaim_stale_detail_queue(self) -> int: ...
+    def reclaim_stale_detail_queue(self, older_than_seconds: int) -> int: ...
     def claim_listing_task(self, crawl_date: date) -> Optional[ListingTask]: ...
     def mark_listing_exhausted(self, progress_id: int) -> None: ...
     def enqueue_detail_urls(
@@ -265,6 +266,14 @@ class ControlPlaneRepo(Protocol):
         (reconciliation không còn giữ queue_id gốc, chỉ đọc lại url từ parquet)."""
         ...
 
+    def mark_urls_pending(self, urls: Sequence[str]) -> None:
+        """Đưa URL của artifact retry dở về pending để crawl lại."""
+        ...
+
+    def reset_run_progress(self, run_id: str) -> None:
+        """Reset bộ đếm sau khi bỏ artifact dở của chính run hiện tại."""
+        ...
+
     def mark_detail_failed(self, queue_id: int) -> None: ...
     def init_run_state(self, run_id: str) -> None: ...
 
@@ -274,6 +283,10 @@ class ControlPlaneRepo(Protocol):
 
     def list_incomplete_runs(self, older_than_seconds: int) -> list[IncompleteRun]:
         """Bước 7 — run_state có ended_at IS NULL và started_at đã đủ cũ."""
+        ...
+
+    def get_incomplete_run(self, run_id: str) -> Optional[IncompleteRun]:
+        """Đọc run hiện tại để tiếp tục sau Airflow retry."""
         ...
 
     def finalize_run_state(
@@ -321,9 +334,8 @@ class BufferWriter(Protocol):
         trong đó để repo cập nhật detail_queue. None nếu không có gì để promote."""
         ...
 
-    def delete_inprogress(self, run_id: str, crawl_date: date) -> None:
-        """Bước 7 — dọn .inprogress của run chết nhưng không đủ điều kiện
-        promote. Không tồn tại thì bỏ qua êm."""
+    def discard_inprogress(self, run_id: str, crawl_date: date) -> list[str]:
+        """Đọc URL rồi xóa .inprogress để retry crawl lại từ đầu."""
         ...
 
 
@@ -342,10 +354,6 @@ class Clock(Protocol):
 class WebCrawlerCore:
     """Điều phối toàn bộ vòng lặp crawl DAG 2. Mọi phụ thuộc inject qua
     constructor để dễ unit test."""
-
-    # Ngưỡng coi 1 run là "chắc chắn đã chết" cho Bước 7 — 2 giờ, chừa dư
-    # buffer cho Celery/Redis redeliver task hoặc retry/đổi proxy kéo dài hợp lệ.
-    RECONCILE_STALE_RUN_AFTER_SECONDS = 2 * 60 * 60
 
     def __init__(
         self,
@@ -372,12 +380,14 @@ class WebCrawlerCore:
         liệu đã flush thành công lên S3 (fetched -> flushed -> done)."""
         today = self.clock.now().date()
 
-        # Bước 7 chạy TRƯỚC KHI động tới detail_queue của run hiện tại — để
-        # các dòng 'flushed' thuộc run vừa khôi phục không bị reclaim oan.
-        self._reconcile_crashed_runs()
+        recovered = self._reconcile_crashed_runs(run_id)
+        if recovered is not None:
+            return recovered
 
         self.repo.apply_daily_reset_if_needed(today)
-        self.repo.reclaim_stale_detail_queue()
+        self.repo.reclaim_stale_detail_queue(
+            older_than_seconds=self.config.reconcile_stale_run_after_seconds
+        )
         self.repo.init_run_state(run_id)
 
         start_monotonic = self.clock.monotonic()
@@ -481,14 +491,46 @@ class WebCrawlerCore:
 
     # -------- Bước 7: phục hồi run bị SIGKILL/OOM --------
 
-    def _reconcile_crashed_runs(self) -> None:
-        """Run đạt min_success_pages -> promote .inprogress thành final +
-        mark URL 'done'. Không đủ -> đóng sổ INCOMPLETE, dữ liệu coi như
-        mất, detail_queue liên quan tự về 'pending' qua reclaim_stale_detail_queue()."""
+    def _reconcile_crashed_runs(self, current_run_id: str) -> Optional[RunResult]:
+        """Resume current retry hoặc reconcile các run cũ bị crash.
+
+        Retry hiện tại chưa đạt ngưỡng sẽ bỏ artifact cũ và requeue URL để
+        tránh ghi đè thiếu dữ liệu lên cùng một `.inprogress`.
+        """
+        current = self.repo.get_incomplete_run(current_run_id)
+        if current is not None:
+            crawl_date = current.started_at.date()
+            if current.detail_pages_done >= self.config.min_success_pages:
+                promoted = self.buffer.promote_inprogress_to_final(current_run_id, crawl_date)
+                if promoted is not None:
+                    self.repo.mark_urls_done(promoted.urls)
+                    self.repo.finalize_run_state(
+                        current_run_id, StopReason.RECOVERED,
+                        current.detail_pages_done, promoted.final_key,
+                    )
+                    logger.info(
+                        "Retry hiện tại: đã khôi phục run_id=%s (%d trang, %d URL promote)",
+                        current_run_id, current.detail_pages_done, len(promoted.urls),
+                    )
+                    return RunResult(
+                        stop_reason=StopReason.RECOVERED,
+                        detail_pages_done=current.detail_pages_done,
+                    )
+            else:
+                urls = self.buffer.discard_inprogress(current_run_id, crawl_date)
+                self.repo.mark_urls_pending(urls)
+                self.repo.reset_run_progress(current_run_id)
+                logger.info(
+                    "Retry hiện tại: bỏ artifact run_id=%s và đưa %d URL về pending",
+                    current_run_id, len(urls),
+                )
+
         incomplete_runs = self.repo.list_incomplete_runs(
-            older_than_seconds=self.RECONCILE_STALE_RUN_AFTER_SECONDS
+            older_than_seconds=self.config.reconcile_stale_run_after_seconds
         )
         for incomplete in incomplete_runs:
+            if incomplete.run_id == current_run_id:
+                continue
             crawl_date = incomplete.started_at.date()
             promoted: Optional[PromotedFile] = None
             if incomplete.detail_pages_done >= self.config.min_success_pages:
@@ -505,16 +547,19 @@ class WebCrawlerCore:
                     incomplete.run_id, incomplete.detail_pages_done, len(promoted.urls),
                 )
             else:
-                self.buffer.delete_inprogress(incomplete.run_id, crawl_date)
+                urls = self.buffer.discard_inprogress(incomplete.run_id, crawl_date)
+                self.repo.mark_urls_pending(urls)
                 self.repo.finalize_run_state(
                     incomplete.run_id, StopReason.INCOMPLETE,
                     incomplete.detail_pages_done, None,
                 )
                 logger.warning(
                     "Reconciliation: run_id=%s không đủ điều kiện khôi phục "
-                    "(%d trang < %d tối thiểu) -> coi là mất, đã dọn .inprogress mồ côi",
-                    incomplete.run_id, incomplete.detail_pages_done, self.config.min_success_pages,
+                    "(%d trang < %d tối thiểu) -> đã đưa %d URL về pending và dọn artifact",
+                    incomplete.run_id, incomplete.detail_pages_done,
+                    self.config.min_success_pages, len(urls),
                 )
+        return None
 
     # -------- Bước 5: xử lý 1 trang chi tiết --------
 
