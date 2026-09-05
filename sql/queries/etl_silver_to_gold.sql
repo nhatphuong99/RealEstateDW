@@ -1,16 +1,19 @@
 -- ============================================================================
 -- sql/queries/etl_silver_to_gold.sql
 -- ETL Silver -> Gold: full-refresh idempotent, chạy trong 1 transaction.
+-- "Full-refresh" = mỗi lần chạy quét lại TOÀN BỘ silver.listing_history,
+-- không incremental theo thời gian. KHÔNG PHẢI truncate-and-reload (không
+-- có TRUNCATE ở đây) — 5 Dim insert-only qua ON CONFLICT DO NOTHING (giữ
+-- nguyên surrogate key giữa các lần chạy); riêng Fact dùng ON CONFLICT DO
+-- UPDATE (upsert) vì silver.listing_history không bất biến không bất biến — 
+-- merge_scd2_listing_history.sql có thể UPDATE is_current/valid_to 
+-- của dòng đã tồn tại -> Gold phải phản ánh đúng, không chỉ insert-once.
 --
 -- Silver và Gold cùng 1 Postgres -> transform thẳng bằng SQL, không kéo
 -- dữ liệu ra Spark/Python (khác Bronze->Silver, cần Spark parse HTML thô).
 --
 -- Thứ tự bắt buộc: nạp 5 Dim trước (idempotent qua ON CONFLICT DO NOTHING),
 -- rồi mới nạp Fact (JOIN lấy surrogate key).
---
--- Fact dùng ON CONFLICT DO UPDATE (không phải DO NOTHING): silver.listing_history
--- không bất biến — merge_scd2_listing_history.sql có thể UPDATE is_current/
--- valid_to của dòng đã tồn tại -> Gold phải phản ánh đúng, không chỉ insert-once.
 --
 -- PHÒNG THỦ: cột CHUỖI feed vào dim_location/dim_property_features bọc
 -- COALESCE(..., '') ở cả bước nạp Dim lẫn JOIN Fact, dù Silver đã NOT NULL
@@ -39,8 +42,7 @@ FROM generate_series(
 ON CONFLICT (date_key) DO NOTHING;
 
 -- ----------------------------------------------------------------------
--- 2. DIM_LOCATION - Type 1 (không SCD2). COALESCE phòng thủ — xem giải
---    thích ở đầu file.
+-- 2. DIM_LOCATION - COALESCE phòng thủ.
 -- ----------------------------------------------------------------------
 INSERT INTO gold.dim_location (province_new, ward_new, province_old, ward_old, district_old, street)
 SELECT DISTINCT
@@ -95,7 +97,7 @@ FROM silver.listing_history
 ON CONFLICT (feature_key) DO NOTHING;
 
 -- ----------------------------------------------------------------------
--- 6. FACT_LISTING_PRICE - UPSERT (không phải insert-only, xem đầu file).
+-- 6. FACT_LISTING_PRICE - UPSERT.
 --    JOIN lấy surrogate key từ Dim vừa nạp — điều kiện JOIN dùng CÙNG
 --    COALESCE như bước 2/5, nếu không dim có '' nhưng Silver đưa NULL vào
 --    so sánh ('' = NULL luôn UNKNOWN) sẽ làm JOIN rớt dòng dù dim đã tồn tại.

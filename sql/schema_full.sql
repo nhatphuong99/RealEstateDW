@@ -286,13 +286,13 @@ CREATE INDEX IF NOT EXISTS idx_parse_quarantine_source_key
 -- ============================================================================
 CREATE SCHEMA IF NOT EXISTS gold;
 
--- DIM_DATE — Type 0, chỉ phủ khoảng posted_date.
+-- DIM_DATE — bảng ngày.
 CREATE TABLE gold.dim_date (
     date_key      INTEGER      PRIMARY KEY,   -- YYYYMMDD
     full_date     DATE         NOT NULL UNIQUE
 );
 
--- DIM_LOCATION — Type 1. street KHÔNG dùng GROUP BY, chỉ tăng độ chi tiết grain.
+-- DIM_LOCATION — bảng địa chỉ.
 CREATE TABLE gold.dim_location (
     location_key    BIGSERIAL     PRIMARY KEY,
     province_new     VARCHAR(100)  NOT NULL DEFAULT '',
@@ -305,7 +305,7 @@ CREATE TABLE gold.dim_location (
     CONSTRAINT uq_dim_location UNIQUE (province_new, ward_new, province_old, ward_old, district_old, street)
 );
 
--- DIM_PROPERTY_TYPE — Type 0, 10 tổ hợp cố định (5 property_type x 2 listing_type).
+-- DIM_PROPERTY_TYPE — 10 tổ hợp cố định (5 property_type x 2 listing_type).
 CREATE TABLE gold.dim_property_type (
     property_type_key    BIGSERIAL     PRIMARY KEY,
     property_type_name    VARCHAR(50)   NOT NULL,
@@ -314,7 +314,7 @@ CREATE TABLE gold.dim_property_type (
     CONSTRAINT uq_dim_property_type UNIQUE (property_type_name, listing_type)
 );
 
--- DIM_SOURCE — Type 0, phục vụ lineage (dataset vs web).
+-- DIM_SOURCE — phục vụ lineage (dataset vs web).
 CREATE TABLE gold.dim_source (
     source_key    BIGSERIAL     PRIMARY KEY,
     source_name    VARCHAR(20)   NOT NULL,   -- 'dataset' | 'web'
@@ -326,7 +326,7 @@ CREATE TABLE gold.dim_source (
 COMMENT ON COLUMN gold.dim_source.source_name IS
     'Suy từ prefix source_bronze_key qua hàm Python infer_source_from_bronze_key() — đổi convention S3 key phải sửa đồng bộ cả 2 nơi.';
 
--- DIM_PROPERTY_FEATURES — Junk dimension, Type 1. feature_key GENERATED STORED.
+-- DIM_PROPERTY_FEATURES — Junk dimension.
 CREATE OR REPLACE FUNCTION gold.compute_feature_key(
     p_orientation VARCHAR,
     p_legal_status VARCHAR,

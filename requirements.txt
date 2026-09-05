@@ -1,8 +1,6 @@
 
 # --- Web automation / crawling ---
 requests==2.34.2          
-playwright==1.61.0        # thay ChromeDriver bằng browser tự quản lý
-selenium==4.46.0         # dự phòng cho site cần đặc thù Selenium Manager
 
 # --- Parsing HTML/text ---
 beautifulsoup4==4.15.0     
