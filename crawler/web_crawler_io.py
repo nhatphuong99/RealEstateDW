@@ -277,7 +277,7 @@ class PsycopgControlPlaneRepo:
             )
 
     def mark_urls_pending(self, urls: Sequence[str]) -> None:
-        """Đưa URL của artifact retry dở về pending để crawl lại."""
+        """Đưa URL của parquet retry dở về pending để crawl lại."""
         if not urls:
             return
         with self._cursor() as cur:
@@ -321,7 +321,7 @@ class PsycopgControlPlaneRepo:
             )
 
     def reset_run_progress(self, run_id: str) -> None:
-        """Reset bộ đếm sau khi bỏ artifact dở của chính run hiện tại."""
+        """Reset bộ đếm sau khi bỏ parquet dở của chính run hiện tại."""
         with self._cursor() as cur:
             cur.execute(
                 """
@@ -360,7 +360,7 @@ class PsycopgControlPlaneRepo:
         ]
 
     def get_incomplete_run(self, run_id: str) -> Optional[IncompleteRun]:
-        """Đọc run hiện tại để Airflow retry có thể resume artifact của nó."""
+        """Đọc run hiện tại để Airflow retry có thể resume parquet của nó."""
         with self._cursor() as cur:
             cur.execute(
                 """
