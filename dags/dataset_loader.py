@@ -15,6 +15,7 @@ from datetime import timedelta
 import pendulum
 from airflow import DAG
 from airflow.decorators import task
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 from crawler import config
 from crawler.dataset_loader_io import (
@@ -47,4 +48,14 @@ with DAG(
         max_active_tis_per_dag=config.DATASET_MAX_ACTIVE_TASKS,
     )(process_one_part_task)
 
-    process_part.expand(part_number=compute_parts())
+    trigger_bronze_to_silver = TriggerDagRunOperator(
+        task_id="trigger_bronze_to_silver",
+        trigger_dag_id="bronze_to_silver",
+        trigger_run_id="{{ run_id }}",
+        wait_for_completion=True,
+        deferrable=True,
+        poke_interval=30,
+    )
+
+    # Chỉ bắt đầu DAG 3 sau khi toàn bộ part cần xử lý của DAG 1 hoàn tất.
+    process_part.expand(part_number=compute_parts()) >> trigger_bronze_to_silver

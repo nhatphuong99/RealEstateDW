@@ -267,11 +267,11 @@ class ControlPlaneRepo(Protocol):
         ...
 
     def mark_urls_pending(self, urls: Sequence[str]) -> None:
-        """Đưa URL của artifact retry dở về pending để crawl lại."""
+        """Đưa URL của parquet retry dở về pending để crawl lại."""
         ...
 
     def reset_run_progress(self, run_id: str) -> None:
-        """Reset bộ đếm sau khi bỏ artifact dở của chính run hiện tại."""
+        """Reset bộ đếm sau khi bỏ parquet dở của chính run hiện tại."""
         ...
 
     def mark_detail_failed(self, queue_id: int) -> None: ...
@@ -494,7 +494,7 @@ class WebCrawlerCore:
     def _reconcile_crashed_runs(self, current_run_id: str) -> Optional[RunResult]:
         """Resume current retry hoặc reconcile các run cũ bị crash.
 
-        Retry hiện tại chưa đạt ngưỡng sẽ bỏ artifact cũ và requeue URL để
+        Retry hiện tại chưa đạt ngưỡng sẽ bỏ parquet cũ và requeue URL để
         tránh ghi đè thiếu dữ liệu lên cùng một `.inprogress`.
         """
         current = self.repo.get_incomplete_run(current_run_id)
@@ -521,7 +521,7 @@ class WebCrawlerCore:
                 self.repo.mark_urls_pending(urls)
                 self.repo.reset_run_progress(current_run_id)
                 logger.info(
-                    "Retry hiện tại: bỏ artifact run_id=%s và đưa %d URL về pending",
+                    "Retry hiện tại: bỏ parquet run_id=%s và đưa %d URL về pending",
                     current_run_id, len(urls),
                 )
 
@@ -555,7 +555,7 @@ class WebCrawlerCore:
                 )
                 logger.warning(
                     "Reconciliation: run_id=%s không đủ điều kiện khôi phục "
-                    "(%d trang < %d tối thiểu) -> đã đưa %d URL về pending và dọn artifact",
+                    "(%d trang < %d tối thiểu) -> đã đưa %d URL về pending và dọn parquet",
                     incomplete.run_id, incomplete.detail_pages_done,
                     self.config.min_success_pages, len(urls),
                 )
