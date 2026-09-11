@@ -431,7 +431,7 @@ class RequestsPageFetcher:
                 timeout=(self._connect_timeout, self._read_timeout),
             )
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-            # Proxy không dùng được -> đổi proxy ngay.
+            # Proxy không dùng được (proxy không connect được hoặc đọc phản hồi chậm) -> đổi proxy ngay.
             logger.warning("Proxy lỗi/treo url=%s proxy=%s: %s", url, proxy_url, exc)
             return FetchResult(status_code=None, error=str(exc), is_proxy_error=True)
         except requests.exceptions.RequestException as exc:

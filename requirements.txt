@@ -4,7 +4,7 @@ requests==2.34.2
 
 # --- Parsing HTML/text ---
 beautifulsoup4==4.15.0     
-lxml==6.1.1                # parser tốc độ cao cho BeautifulSoup/Scrapy
+lxml==6.1.1                # parser tốc độ cao cho BeautifulSoup
 
 # --- Data Processing ---
 pyspark==4.2.0
