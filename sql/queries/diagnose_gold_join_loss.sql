@@ -44,18 +44,14 @@ WHERE pt.property_type_key IS NULL
 
 UNION ALL
 
--- 3. Có bao nhiêu dòng Silver không khớp được gold.dim_source? 
+-- 3. Có bao nhiêu dòng Silver không khớp được gold.dim_source?
 SELECT
     'dim_source' AS join_target,
     COUNT(*) AS orphan_count,
     0 AS orphan_with_real_null
 FROM silver.listing_history h
 LEFT JOIN gold.dim_source src
-    ON src.source_name = CASE
-        WHEN h.source_bronze_key LIKE 'bronze/dataset/%' THEN 'dataset'
-        WHEN h.source_bronze_key LIKE 'bronze/web/%' THEN 'web'
-        ELSE NULL
-    END
+    ON src.source_name = gold.infer_source_from_bronze_key(h.source_bronze_key)
    AND src.source_part = h.source_part
 WHERE src.source_key IS NULL
 
@@ -79,10 +75,6 @@ JOIN gold.dim_location loc
 JOIN gold.dim_property_type pt
     ON pt.property_type_name = h.property_type AND pt.listing_type = h.listing_type
 JOIN gold.dim_source src
-    ON src.source_name = CASE
-        WHEN h.source_bronze_key LIKE 'bronze/dataset/%' THEN 'dataset'
-        WHEN h.source_bronze_key LIKE 'bronze/web/%' THEN 'web'
-        ELSE NULL
-    END
+    ON src.source_name = gold.infer_source_from_bronze_key(h.source_bronze_key)
    AND src.source_part = h.source_part;
 

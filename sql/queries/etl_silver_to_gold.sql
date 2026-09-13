@@ -65,18 +65,17 @@ FROM silver.listing_history
 ON CONFLICT (property_type_name, listing_type) DO NOTHING;
 
 -- ----------------------------------------------------------------------
--- 4. DIM_SOURCE - suy source_name từ prefix source_bronze_key.
--- Duplicate CÓ CHỦ ĐÍCH của hàm Python infer_source_from_bronze_key()
--- (SQL không gọi được) — đổi convention S3 key phải sửa đồng bộ cả 2 nơi
--- (hàm Python + khối CASE này, lặp lại ở bước 6 khi JOIN Fact).
+-- 4. DIM_SOURCE - suy source_name từ prefix source_bronze_key qua
+-- gold.infer_source_from_bronze_key() (schema_full.sql) — nguồn sự thật
+-- duy nhất phía SQL, dùng lại ở bước 6 khi JOIN Fact và trong
+-- diagnose_gold_join_loss.sql. Vẫn phải khớp 1:1 với hàm Python
+-- infer_source_from_bronze_key() (parser/bronze_to_silver_core.py) —
+-- đổi convention S3 key phải sửa đồng bộ CẢ 2 hàm (SQL + Python), vì
+-- SQL và Python là 2 runtime khác nhau, không thể dùng chung 1 hàm.
 -- ----------------------------------------------------------------------
 INSERT INTO gold.dim_source (source_name, source_part)
 SELECT DISTINCT
-    CASE
-        WHEN source_bronze_key LIKE 'bronze/dataset/%' THEN 'dataset'
-        WHEN source_bronze_key LIKE 'bronze/web/%' THEN 'web'
-        ELSE NULL  -- không khớp prefix nào -> lộ ra qua diagnose_gold_join_loss.sql
-    END AS source_name,
+    gold.infer_source_from_bronze_key(source_bronze_key) AS source_name,
     source_part
 FROM silver.listing_history
 ON CONFLICT (source_name, source_part) DO NOTHING;
@@ -156,11 +155,7 @@ JOIN gold.dim_property_type pt
     ON pt.property_type_name = h.property_type
    AND pt.listing_type = h.listing_type
 JOIN gold.dim_source src
-    ON src.source_name = CASE
-        WHEN h.source_bronze_key LIKE 'bronze/dataset/%' THEN 'dataset'
-        WHEN h.source_bronze_key LIKE 'bronze/web/%' THEN 'web'
-        ELSE NULL
-    END
+    ON src.source_name = gold.infer_source_from_bronze_key(h.source_bronze_key)
    AND src.source_part = h.source_part
 ON CONFLICT (listing_key) DO UPDATE SET
     listing_id                 = EXCLUDED.listing_id,

@@ -1,11 +1,12 @@
 """
 crawler/proxy_manager.py
 
-Thành phần 2 (Web Crawler) — quản lý proxy động:
-- Nguồn: ProxyScrape v4, GeoNode.
-- Health-check song song qua httpbin.org/ip.
-- ProxyPool: round-robin + refill, implement Protocol ProxyPool (current/rotate/mark_failed).
-- Không persist proxy xuống DB — proxy free chết nhanh, refill lại khi cần.
+Component 2 (Web Crawler) — dynamic proxy pool management:
+- Sources: ProxyScrape v4, GeoNode.
+- Parallel health-check via httpbin.org/ip.
+- ProxyPool: round-robin + refill, implements the ProxyPool Protocol
+  (current/rotate/mark_failed).
+- Not persisted to DB — free proxies die fast; refill on demand instead.
 """
 
 
@@ -27,7 +28,7 @@ PROXYSCRAPE_URL = "https://api.proxyscrape.com/v4/free-proxy-list/get"
 GEONODE_URL = "https://proxylist.geonode.com/api/proxy-list"
 HEALTH_CHECK_URL = "https://httpbin.org/ip"
 
-# GeoNode chặn User-Agent mặc định (403) — bắt buộc set header giả trình duyệt.
+# GeoNode blocks the default User-Agent (403) — a browser-like header is required.
 GEONODE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -37,14 +38,14 @@ GEONODE_HEADERS = {
 
 
 # ============================================================
-# 1. Fetch proxy thô từ 2 nguồn
+# 1. Fetch raw proxies from the 2 sources
 # ============================================================
 
 def fetch_from_proxyscrape(
     timeout: float = config.PROXYSCRAPE_TIMEOUT_SECONDS,
     limit: int = config.PROXYSCRAPE_LIMIT,
 ) -> list[str]:
-    """Chỉ giữ proxy dạng http://, loại socks4/socks5."""
+    """Only keep http:// proxies, drop socks4/socks5."""
     try:
         response = requests.get(
             PROXYSCRAPE_URL,
@@ -60,7 +61,7 @@ def fetch_from_proxyscrape(
         )
         response.raise_for_status()
     except requests.exceptions.RequestException as exc:
-        logger.warning("Không lấy được proxy từ ProxyScrape: %s", exc)
+        logger.warning("Failed to fetch proxies from ProxyScrape: %s", exc)
         return []
 
     lines = response.text.strip().splitlines()
@@ -71,7 +72,7 @@ def fetch_from_geonode(
     timeout: float = config.GEONODE_TIMEOUT_SECONDS,
     limit: int = config.GEONODE_LIMIT,
 ) -> list[str]:
-    """Lấy proxy HTTP từ GeoNode."""
+    """Fetch HTTP proxies from GeoNode."""
     try:
         response = requests.get(
             GEONODE_URL,
@@ -87,13 +88,13 @@ def fetch_from_geonode(
         )
         response.raise_for_status()
     except requests.exceptions.RequestException as exc:
-        logger.warning("Không lấy được proxy từ GeoNode: %s", exc)
+        logger.warning("Failed to fetch proxies from GeoNode: %s", exc)
         return []
 
     try:
         rows = response.json().get("data", [])
     except ValueError:
-        logger.warning("GeoNode trả về dữ liệu không phải JSON hợp lệ")
+        logger.warning("GeoNode returned invalid JSON")
         return []
 
     proxies: list[str] = []
@@ -107,11 +108,11 @@ def fetch_from_geonode(
 
 
 # ============================================================
-# 2. Health-check song song
+# 2. Parallel health-check
 # ============================================================
 
 def health_check_one(proxy_url: str, timeout: float) -> bool:
-    """Kiểm tra proxy còn sống và đủ nhanh."""
+    """Check whether a proxy is alive and fast enough."""
     start = time.monotonic()
     try:
         response = requests.get(
@@ -122,7 +123,7 @@ def health_check_one(proxy_url: str, timeout: float) -> bool:
         elapsed = time.monotonic() - start
         alive = response.status_code == 200
         if alive:
-            logger.debug("Proxy %s sống, phản hồi sau %.2fs", proxy_url, elapsed)
+            logger.debug("Proxy %s alive, responded in %.2fs", proxy_url, elapsed)
         return alive
     except requests.exceptions.RequestException:
         return False
@@ -144,10 +145,10 @@ def health_check_parallel(
             try:
                 if future.result():
                     alive.append(proxy)
-            except Exception:  # noqa: BLE001 - health-check không được crash refill()
-                logger.debug("Health-check lỗi bất thường với proxy %s", proxy)
+            except Exception:  # noqa: BLE001 - a health-check failure must not crash refill()
+                logger.debug("Unexpected health-check error for proxy %s", proxy)
 
-    logger.info("Health-check: %d/%d proxy còn sống", len(alive), len(candidates))
+    logger.info("Health-check: %d/%d proxies alive", len(alive), len(candidates))
     return alive
 
 
@@ -156,7 +157,7 @@ def fetch_fresh_proxies(
     health_check_workers: int = config.PROXY_HEALTH_CHECK_WORKERS,
     health_check_timeout: float = config.PROXY_HEALTH_CHECK_TIMEOUT_SECONDS,
 ) -> list[str]:
-    """Gộp 2 nguồn, dedup (giữ thứ tự), health-check song song."""
+    """Merge both sources, dedup (order preserved), health-check in parallel."""
     proxyscrape_proxies = fetch_from_proxyscrape()
     geonode_proxies = fetch_from_geonode()
 
@@ -164,7 +165,7 @@ def fetch_fresh_proxies(
     candidates = combined[:max_candidates]
 
     logger.info(
-        "Thu được %d proxy thô (ProxyScrape=%d, GeoNode=%d) -> health-check %d proxy (timeout=%.1fs)",
+        "Collected %d raw proxies (ProxyScrape=%d, GeoNode=%d) -> health-checking %d (timeout=%.1fs)",
         len(combined), len(proxyscrape_proxies), len(geonode_proxies), len(candidates),
         health_check_timeout,
     )
@@ -176,9 +177,9 @@ def fetch_fresh_proxies(
 # ============================================================
 
 class ProxyPool:
-    """Pool proxy trong bộ nhớ. refill() do orchestrator tự gọi khi cần
-    (đầu run hoặc khi cạn) — network call tốn thời gian, không gọi trong
-    vòng lặp fetch chính."""
+    """In-memory proxy pool. refill() is called by the orchestrator when
+    needed (start of run or when exhausted) — it's a network call, so it's
+    never invoked inside the main fetch loop."""
 
     def __init__(self, proxies: Optional[list[str]] = None) -> None:
         self._lock = threading.Lock()
@@ -189,7 +190,7 @@ class ProxyPool:
     def __len__(self) -> int:
         return len(self._proxies)
 
-    # -------- Protocol ProxyPool --------
+    # -------- ProxyPool Protocol --------
 
     def current(self) -> Optional[str]:
         with self._lock:
@@ -218,7 +219,7 @@ class ProxyPool:
         with self._lock:
             self._failed.add(proxy_url)
 
-    # -------- Mutation riêng, orchestrator tự gọi --------
+    # -------- Mutations only the orchestrator calls --------
 
     def refill(
         self,
@@ -226,13 +227,13 @@ class ProxyPool:
         health_check_workers: int = config.PROXY_HEALTH_CHECK_WORKERS,
         health_check_timeout: float = config.PROXY_HEALTH_CHECK_TIMEOUT_SECONDS,
     ) -> int:
-        """Thay toàn bộ danh sách hiện tại bằng proxy mới đã health-check."""
+        """Replace the entire current list with freshly health-checked proxies."""
         fresh = fetch_fresh_proxies(max_candidates, health_check_workers, health_check_timeout)
         with self._lock:
             self._proxies = fresh
             self._failed = set()
             self._index = 0 if fresh else -1
-        logger.info("refill() hoàn tất: pool hiện có %d proxy sống", len(fresh))
+        logger.info("refill() done: pool now has %d live proxies", len(fresh))
         return len(fresh)
 
     def healthy_count(self) -> int:
@@ -241,8 +242,8 @@ class ProxyPool:
 
 
 if __name__ == "__main__":
-    # Smoke test thủ công — chỉ chạy trên máy có mạng thật.
+    # Manual smoke test — only run on a machine with real internet access.
     logging.basicConfig(level=logging.INFO)
     pool = ProxyPool()
     n = pool.refill()
-    print(f"Đã nạp {n} proxy sống. current() = {pool.current()}")
+    print(f"Loaded {n} live proxies. current() = {pool.current()}")

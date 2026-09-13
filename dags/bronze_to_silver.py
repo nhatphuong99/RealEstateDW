@@ -1,15 +1,16 @@
 """
 dags/bronze_to_silver.py
 
-Thành phần 3 — DAG 3: ETL Bronze -> Silver (Spark parse + SQL merge SCD2).
+Component 3 — DAG 3: ETL Bronze -> Silver (Spark parse + SQL SCD2 merge).
 
-Task cuối `trigger_silver_to_gold` nối sang DAG 4, hoàn thiện chuỗi
-crawl -> Silver -> Gold khởi động từ DAG 2. `schedule=None` — DAG này
-luôn được DAG 2 trigger, không tự chạy theo lịch riêng.
+The final task `trigger_silver_to_gold` chains into DAG 4, completing the
+crawl -> Silver -> Gold chain started by DAG 1 or DAG 2. `schedule=None`
+— this DAG is always triggered by DAG 1/2, never runs on its own schedule.
 
-`run_etl.expand(s3_key=keys) >> trigger_silver_to_gold`: trigger chỉ chạy
-sau khi mọi mapped instance của run_etl xong — kể cả khi `keys` rỗng, vẫn
-chạy trigger bình thường (Gold ETL idempotent, no-op an toàn).
+`run_etl.expand(s3_key=keys) >> trigger_silver_to_gold`: the trigger only
+runs after every mapped run_etl instance has finished — even when `keys`
+is empty, the trigger still runs normally (the Gold ETL is idempotent, a
+no-op is safe).
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ default_args = {
 
 with DAG(
     dag_id="bronze_to_silver",
-    description="DAG 3 - ETL Bronze -> Silver (Spark parse + SQL merge SCD2), tự động nối sang DAG 4",
+    description="DAG 3 - ETL Bronze -> Silver (Spark parse + SQL SCD2 merge), auto-chains into DAG 4",
     schedule=None,
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Ho_Chi_Minh"),
     catchup=False,
@@ -46,10 +47,10 @@ with DAG(
     default_args=default_args,
     tags=["silver", "etl", "spark", "dag3"],
 ) as dag:
-    # Xóa file tạm còn sót
+    # Remove leftover temp files
     cleanup_tmp = task(task_id="cleanup_orphaned_tmp_dirs")(cleanup_orphaned_tmp_dirs)()
 
-    # Reset parquet bị kẹt ('failed'/'processing') -> 'pending'
+    # Reset parquet files stuck in ('failed'/'processing') -> 'pending'
     reset_stuck = task(task_id="reset_stuck_files")(reset_stuck_files)()
     discover = task(task_id="discover_pending_files")(discover_pending_files)()
     keys = task(task_id="get_pending_s3_keys")(get_pending_s3_keys)()
@@ -59,16 +60,16 @@ with DAG(
         max_active_tis_per_dag=config.SPARK_MAX_ACTIVE_TASKS,
     )(run_etl_bronze_to_silver)
 
-    # trigger_run_id="{{ run_id }}" của DAG 3 (không phải run_id gốc của
-    # DAG 2) — mỗi DAG namespace run_id riêng, vẫn đủ để trace theo thời
-    # gian trigger trên Airflow UI.
+    # trigger_run_id="{{ run_id }}" refers to DAG 3's own run_id (not DAG
+    # 2's original one) — each DAG namespaces its run_id separately, still
+    # traceable by trigger time in the Airflow UI.
     trigger_silver_to_gold = TriggerDagRunOperator(
         task_id="trigger_silver_to_gold",
         trigger_dag_id="silver_to_gold",
         trigger_run_id="{{ run_id }}",
         wait_for_completion=True,
         deferrable=True,
-        poke_interval=15,  # Gold ETL là SQL-only, thường nhanh -> poll dày hơn
+        poke_interval=15,  # Gold ETL is SQL-only, usually fast -> poll more frequently
     )
 
     cleanup_tmp >> reset_stuck >> discover >> keys

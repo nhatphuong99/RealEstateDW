@@ -1,10 +1,10 @@
 """
 parser/bronze_file_state_io.py
 
-Thành phần 3 (ETL Bronze -> Silver) — control-plane: quét S3 tìm file
-Bronze mới (Bước 1) và chạy ETL trọn vẹn 1 file (Bước 2-7, gộp Spark
-parse + merge SCD2). Tách khỏi bronze_to_silver_io.py vì đây là lớp
-orchestration/control-plane, không phải logic Spark thuần.
+Component 3 (ETL Bronze -> Silver) — control-plane: scan S3 for new Bronze
+files (Step 1) and run the full ETL for a single file (Steps 2-7, combining
+Spark parse + SCD2 merge). Kept separate from bronze_to_silver_io.py
+because this is the orchestration/control-plane layer, not pure Spark logic.
 """
 
 from __future__ import annotations
@@ -24,7 +24,13 @@ from parser.bronze_to_silver_io import (
     read_bronze_parquet,
     write_staging_and_quarantine,
 )
-from parser.config import BRONZE_TMP_DIR_PREFIX, get_postgres_dsn, get_s3_bucket
+from parser.config import (
+    BRONZE_DATASET_PREFIX as _DATASET_PREFIX,
+    BRONZE_TMP_DIR_PREFIX,
+    BRONZE_WEB_PREFIX as _WEB_PREFIX,
+    get_postgres_dsn,
+    get_s3_bucket,
+)
 
 import shutil
 import tempfile
@@ -34,30 +40,28 @@ import logging
 logger = logging.getLogger(__name__)
 
 _BRONZE_PREFIX = "bronze/"
-_DATASET_PREFIX = "bronze/dataset/"
-_WEB_PREFIX = "bronze/web/"
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _MERGE_SCD2_SQL_PATH = _PROJECT_ROOT / "sql" / "queries" / "merge_scd2_listing_history.sql"
 
 
 # ---------------------------------------------------------------------------
-# Bước 1 — discover_pending_files
+# Step 1 — discover_pending_files
 # ---------------------------------------------------------------------------
 
 
 def _infer_source(s3_key: str) -> str:
-    """Suy 'source' ('dataset'|'web') từ prefix của s3_key."""
+    """Infer 'source' ('dataset'|'web') from the s3_key prefix."""
     if s3_key.startswith(_DATASET_PREFIX):
         return "dataset"
     if s3_key.startswith(_WEB_PREFIX):
         return "web"
-    raise ValueError(f"Không suy được source (dataset/web) từ s3_key: {s3_key!r}")
+    raise ValueError(f"Could not infer source (dataset/web) from s3_key: {s3_key!r}")
 
 
 def list_bronze_parquet_keys(s3_client=None) -> list[str]:
-    """List toàn bộ key .parquet dưới prefix bronze/ (dùng paginator vì
-    list_objects_v2 giới hạn 1000 object/page)."""
+    """List every .parquet key under the bronze/ prefix (paginated —
+    list_objects_v2 caps out at 1000 objects/page)."""
     s3_client = s3_client or boto3.client("s3")
     bucket = get_s3_bucket()
     paginator = s3_client.get_paginator("list_objects_v2")
@@ -72,8 +76,9 @@ def list_bronze_parquet_keys(s3_client=None) -> list[str]:
 
 
 def discover_pending_files() -> int:
-    """Quét S3, insert key mới vào pipeline.bronze_file_state (status='pending').
-    Idempotent qua ON CONFLICT DO NOTHING. Trả về số dòng mới thực sự insert."""
+    """Scan S3, insert new keys into pipeline.bronze_file_state
+    (status='pending'). Idempotent via ON CONFLICT DO NOTHING. Returns the
+    number of rows actually newly inserted."""
     keys = list_bronze_parquet_keys()
     if not keys:
         return 0
@@ -102,8 +107,9 @@ def discover_pending_files() -> int:
 
 
 def cleanup_orphaned_tmp_dirs(max_age_hours: float = 12.0) -> int:
-    """Xóa thư mục /tmp/bronze_dl_* còn sót từ lần chạy trước bị kill cứng.
-    Chỉ động vào prefix 'bronze_dl_'. Trả về số thư mục đã xóa."""
+    """Delete leftover /tmp/bronze_dl_* directories from a prior run that
+    was killed abruptly. Only touches the 'bronze_dl_' prefix. Returns the
+    number of directories removed."""
     base_tmp_dir = tempfile.gettempdir()
     cutoff = time.time() - max_age_hours * 3600
     removed = 0
@@ -118,13 +124,13 @@ def cleanup_orphaned_tmp_dirs(max_age_hours: float = 12.0) -> int:
                 shutil.rmtree(entry.path, ignore_errors=True)
                 removed += 1
         except FileNotFoundError:
-            continue  # đã bị xóa bởi tiến trình khác giữa lúc scan và stat
+            continue  # already removed by another process between scan and stat
 
     return removed
 
 
 # ---------------------------------------------------------------------------
-# Bước 2-7 — run_etl_bronze_to_silver
+# Steps 2-7 — run_etl_bronze_to_silver
 # ---------------------------------------------------------------------------
 
 
@@ -162,28 +168,29 @@ def _mark_failed(conn, s3_key: str, error_message: str) -> None:
                 last_error = %s
             WHERE s3_key = %s
             """,
-            (error_message[:2000], s3_key),  # cắt bớt tránh log lỗi khổng lồ
+            (error_message[:2000], s3_key),  # truncated to avoid huge error logs
         )
 
 
 def _run_scd2_merge(conn) -> None:
-    """Chạy nguyên văn merge_scd2_listing_history.sql (Bước 6) — file này
-    tự bọc BEGIN;...COMMIT;, nên conn phải autocommit=True để không lồng
-    transaction."""
+    """Run merge_scd2_listing_history.sql verbatim (Step 6) — the file
+    wraps its own BEGIN;...COMMIT;, so conn must be autocommit=True to
+    avoid nesting transactions."""
     sql_text = _MERGE_SCD2_SQL_PATH.read_text(encoding="utf-8")
     with conn.cursor() as cur:
         cur.execute(sql_text)
 
 def _truncate_staging_after_success(conn) -> None:
-    """Dọn silver.listing_staging_batch ngay sau khi merge SCD2 thành công."""
+    """Clean up silver.listing_staging_batch right after a successful SCD2 merge."""
     with conn.cursor() as cur:
         cur.execute("TRUNCATE silver.listing_staging_batch")
 
 
 def run_etl_bronze_to_silver(s3_key: str) -> None:
-    """Điểm gọi duy nhất cho PythonOperator, xử lý 1 file/lần gọi (dynamic
-    mapping — mỗi file 1 Task Instance, retry riêng không kéo cả batch).
-    Vòng đời bronze_file_state: pending -> processing -> done | failed."""
+    """The single entry point for the PythonOperator, processes one file
+    per call (dynamic mapping — one Task Instance per file, retries don't
+    drag the whole batch down). bronze_file_state lifecycle:
+    pending -> processing -> done | failed."""
     t0 = time.perf_counter()
     conn = psycopg2.connect(get_postgres_dsn())
     conn.autocommit = True
@@ -197,8 +204,8 @@ def run_etl_bronze_to_silver(s3_key: str) -> None:
                 (s3_key,),
             )
 
-        # Tải Bronze về local trước khi khởi động Spark — tránh JVM chiếm
-        # CPU làm nghẽn download qua boto3.
+        # Download Bronze locally before starting Spark — avoids the JVM
+        # competing for CPU with the boto3 download.
         tmp_dir = download_bronze_file(s3_key)
         try:
             local_path = os.path.join(tmp_dir.name, os.path.basename(s3_key))
@@ -210,8 +217,8 @@ def run_etl_bronze_to_silver(s3_key: str) -> None:
             try:
                 t_read_start = time.perf_counter()
                 bronze_df = read_bronze_parquet(spark, local_path, s3_key)
-                n_rows = bronze_df.count()  # đã cache nên gần như free, chỉ để log
-                logger.info("[TIMING] read_bronze_parquet: %.1fs (%d dòng)",
+                n_rows = bronze_df.count()  # already cached, nearly free — just for logging
+                logger.info("[TIMING] read_bronze_parquet: %.1fs (%d rows)",
                             time.perf_counter() - t_read_start, n_rows)
 
                 t_parse_start = time.perf_counter()
@@ -239,12 +246,12 @@ def run_etl_bronze_to_silver(s3_key: str) -> None:
             _truncate_staging_after_success(conn)
         except Exception as cleanup_exc:  # noqa: BLE001
             logger.warning(
-                "[CLEANUP] Truncate staging sau merge thất bại cho %s (không crash task): %s",
+                "[CLEANUP] Failed to truncate staging after merge for %s (not fatal): %s",
                 s3_key, cleanup_exc,
             )
 
         _mark_done(conn, s3_key, rows_parsed, rows_quarantined)
-        logger.info("[TIMING] TỔNG: %.1fs cho file %s", time.perf_counter() - t0, s3_key)
+        logger.info("[TIMING] TOTAL: %.1fs for file %s", time.perf_counter() - t0, s3_key)
 
     except Exception as exc:
         _mark_failed(conn, s3_key, str(exc))
@@ -253,8 +260,8 @@ def run_etl_bronze_to_silver(s3_key: str) -> None:
         conn.close()
 
 def get_pending_s3_keys() -> list[str]:
-    """Danh sách s3_key status='pending', input cho .expand() của
-    run_etl_bronze_to_silver."""
+    """List of s3_keys with status='pending', input for
+    run_etl_bronze_to_silver's .expand()."""
     conn = psycopg2.connect(get_postgres_dsn())
     try:
         with conn.cursor() as cur:
@@ -268,8 +275,8 @@ def get_pending_s3_keys() -> list[str]:
 
 
 def reset_stuck_files() -> int:
-    """Reset file kẹt ở 'failed' (hết retry Airflow) hoặc 'processing'
-    (task bị kill giữa chừng) về 'pending'."""
+    """Reset files stuck in 'failed' (Airflow retries exhausted) or
+    'processing' (task killed mid-run) back to 'pending'."""
     conn = psycopg2.connect(get_postgres_dsn())
     try:
         with conn:

@@ -1,8 +1,9 @@
 """
 config.py (project root)
 
-Cấu hình dùng chung cho toàn project (≥2 package: crawler, parser).
-Tham số đặc thù (proxy, Spark...) giữ riêng trong crawler/config.py hoặc parser/config.py.
+Shared config for the whole project (>=2 packages: crawler, parser).
+Package-specific params (proxy, Spark...) stay in crawler/config.py or
+parser/config.py.
 """
 
 import os
@@ -14,10 +15,10 @@ load_dotenv(dotenv_path=_ENV_PATH)
 
 
 def _require(name: str) -> str:
-    """Đọc biến môi trường bắt buộc, raise nếu thiếu."""
+    """Read a required env var, raise if missing."""
     value = os.getenv(name)
     if not value:
-        raise RuntimeError(f"Thiếu biến môi trường: {name}")
+        raise RuntimeError(f"Missing environment variable: {name}")
     return value
 
 
@@ -25,13 +26,13 @@ def _require(name: str) -> str:
 RUNNING_IN_CONTAINER = os.getenv("AIRFLOW_HOME") is not None
 
 def get_postgres_dsn() -> str:
-    """Trả về DSN đúng ngữ cảnh (container hoặc local)."""
+    """Return the DSN for the current context (container or local)."""
     if RUNNING_IN_CONTAINER:
         return _require("POSTGRES_DW_DSN")
     return _require("POSTGRES_DW_DSN_LOCAL")
 
 
-# AWS S3 (Bronze layer) — boto3/Spark tự đọc AWS_ACCESS_KEY_ID/SECRET từ os.environ.
+# AWS S3 (Bronze layer) — boto3/Spark read AWS_ACCESS_KEY_ID/SECRET from os.environ directly.
 def get_s3_bucket() -> str:
     return _require("S3_BRONZE_BUCKET")
 

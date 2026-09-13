@@ -1,12 +1,13 @@
 """
 crawler/dataset_loader_io.py
 
-Thành phần 1 (Dataset Loader) — I/O thật cho các Protocol trong
+Component 1 (Dataset Loader) — real I/O for the Protocols defined in
 dataset_loader_core.py: RequestsPartFetcher (CDN), S3PartUploader,
-PsycopgPartStateStore. 2 hàm cuối file là điểm gọi duy nhất cho
-dags/dataset_loader.py.
+PsycopgPartStateStore. The last two functions are the only entry points
+called from dags/dataset_loader.py.
 
-Không viết retry loop — lỗi ghi vào DB rồi raise, để Airflow tự retry.
+No retry loop here — errors are written to the DB then raised, letting
+Airflow handle the retry.
 """
 
 
@@ -40,7 +41,7 @@ logger = logging.getLogger("dataset_loader_io")
 
 HCM_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
-# CDN/WAF có thể chặn User-Agent mặc định của requests -> giả UA trình duyệt.
+# The CDN/WAF may block the default requests User-Agent -> spoof a browser UA.
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -50,11 +51,11 @@ DEFAULT_HEADERS = {
 
 
 # ============================================================
-# Bước 2-3: RequestsPartFetcher — probe + download
+# Steps 2-3: RequestsPartFetcher — probe + download
 # ============================================================
 
 class RequestsPartFetcher:
-    """GET trực tiếp CDN, không qua proxy."""
+    """GET straight from the CDN, no proxy."""
 
     def __init__(
         self,
@@ -72,7 +73,8 @@ class RequestsPartFetcher:
         return f"{self._base_url}/part{part_number}.parquet"
 
     def probe(self, part_number: int) -> ProbeResult:
-        """GET + Range: bytes=0-0 (không dùng HEAD — CDN trả 401 sai chuẩn)."""
+        """GET with a `Range: bytes=0-0` header to check existence (not HEAD
+        — the CDN returns a non-standard 401 for HEAD requests)."""
         url = self._part_url(part_number)
         try:
             response = requests.get(
@@ -92,8 +94,8 @@ class RequestsPartFetcher:
 
     @staticmethod
     def _parse_total_size(headers) -> Optional[int]:
-        """Ưu tiên Content-Range (VD "bytes 0-0/12345" -> 12345) vì
-        Content-Length khi dùng Range chỉ là size phần trả về."""
+        """Prefer Content-Range (e.g. "bytes 0-0/12345" -> 12345) since
+        Content-Length under a Range request only reflects the returned chunk."""
         content_range = headers.get("Content-Range")
         if content_range and "/" in content_range:
             total = content_range.rsplit("/", 1)[-1]
@@ -103,7 +105,8 @@ class RequestsPartFetcher:
         return int(content_length) if content_length and content_length.isdigit() else None
 
     def download(self, part_number: int) -> DownloadResult:
-        """GET full file 1 lần — part lớn nhất ~10.000 dòng, không cần streaming."""
+        """GET the whole file in one shot — the largest part is ~10,000 rows,
+        small enough to not need streaming."""
         if self._request_delay:
             time.sleep(self._request_delay)
         url = self._part_url(part_number)
@@ -116,7 +119,7 @@ class RequestsPartFetcher:
 
 
 # ============================================================
-# Bước 4: S3PartUploader
+# Step 4: S3PartUploader
 # ============================================================
 
 class S3PartUploader:
@@ -135,7 +138,7 @@ class S3PartUploader:
 
 
 def list_existing_s3_keys(bucket: str, prefix: str, s3_client=None) -> set[str]:
-    """Liệt kê key thực trên S3 để đối chiếu với pipeline.dataset_part_state."""
+    """List real S3 keys to reconcile against pipeline.dataset_part_state."""
     s3 = s3_client or boto3.client("s3")
     paginator = s3.get_paginator("list_objects_v2")
     keys: set[str] = set()
@@ -150,7 +153,7 @@ def list_existing_s3_keys(bucket: str, prefix: str, s3_client=None) -> set[str]:
 # ============================================================
 
 class PsycopgPartStateStore:
-    """autocommit=True — mỗi method là 1 statement độc lập."""
+    """autocommit=True — each method is an independent statement."""
 
     def __init__(self, dsn: str) -> None:
         self._conn = psycopg2.connect(dsn)
@@ -202,7 +205,7 @@ class PsycopgPartStateStore:
 
 
 # ============================================================
-# Factory — đọc cấu hình qua crawler/config.py
+# Factory — build from env via crawler/config.py
 # ============================================================
 
 def build_part_fetcher_from_env() -> RequestsPartFetcher:
@@ -223,33 +226,33 @@ def build_state_store_from_env() -> PsycopgPartStateStore:
 
 
 # ============================================================
-# Wiring — 2 điểm gọi cho dags/dataset_loader.py
+# Wiring — the 2 entry points for dags/dataset_loader.py
 # ============================================================
 
 def compute_parts_to_process_task() -> list[int]:
-    """Task không mapped — trả về danh sách part_number cần xử lý,
-    dùng làm input cho `.expand()` của process_one_part_task."""
+    """Non-mapped task — returns the list of part_numbers to process, used
+    as input for process_one_part_task's .expand()."""
     with build_state_store_from_env() as store:
         states = store.list_states()
 
     if not is_fully_seeded(states):
         logger.warning(
-            "pipeline.dataset_part_state chỉ có %d/%d dòng — không khớp với thông tin dataset",
+            "pipeline.dataset_part_state only has %d/%d rows — does not match the expected dataset",
             len(states), TOTAL_PARTS,
         )
 
     existing_keys = list_existing_s3_keys(config.get_s3_bucket(), config.DATASET_S3_PREFIX)
     parts = compute_parts_to_process(states, existing_keys)
     logger.info(
-        "compute_parts_to_process_task: %d/%d part cần xử lý -> %s",
+        "compute_parts_to_process_task: %d/%d parts need processing -> %s",
         len(parts), len(states), parts,
     )
     return parts
 
 
 def process_one_part_task(part_number: int) -> None:
-    """Task mapped, 1 Task Instance/part. Lỗi -> ghi DB rồi raise để
-    Airflow tự retry đúng instance này."""
+    """Mapped task, one Task Instance per part. On failure -> write to DB
+    then raise so Airflow retries this exact instance."""
     outcome: PartOutcome = process_one_part(
         part_number,
         fetcher=build_part_fetcher_from_env(),
@@ -260,9 +263,9 @@ def process_one_part_task(part_number: int) -> None:
         if outcome.success:
             store.mark_done(part_number, outcome.s3_key)
         else:
-            store.mark_failed(part_number, outcome.error or "Lỗi không rõ nguyên nhân")
+            store.mark_failed(part_number, outcome.error or "Unknown error")
 
     if not outcome.success:
-        raise RuntimeError(f"Xử lý part {part_number} thất bại: {outcome.error}")
+        raise RuntimeError(f"Failed to process part {part_number}: {outcome.error}")
 
-    logger.info("Part %d xử lý xong -> %s", part_number, outcome.s3_key)
+    logger.info("Part %d processed -> %s", part_number, outcome.s3_key)

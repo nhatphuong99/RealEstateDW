@@ -1,8 +1,8 @@
-"""dags/silver_to_gold.py — Thành phần 4 — DAG 4: ETL Silver -> Gold.
+"""dags/silver_to_gold.py — Component 4 — DAG 4: ETL Silver -> Gold.
 
-Bước cuối trong chuỗi tự động hourly: DAG 2 (@hourly) -> DAG 3 -> DAG 4
-(file này). `schedule=None` — DAG này không tự chạy theo lịch riêng,
-luôn được DAG 3 trigger.
+Final step of the automated hourly chain: DAG 2 (@hourly) -> DAG 3 -> DAG 4
+(this file). `schedule=None` — this DAG never runs on its own schedule,
+always triggered by DAG 3.
 """
 from __future__ import annotations
 
@@ -22,8 +22,8 @@ default_args = {
 
 with DAG(
     dag_id="silver_to_gold",
-    description="DAG 4 - ETL Silver -> Gold (bước cuối chuỗi tự động DAG2->3->4), "
-                 "full-refresh idempotent qua 1 transaction SQL",
+    description="DAG 4 - ETL Silver -> Gold (final step of the DAG2->3->4 automated chain), "
+                 "idempotent full-refresh via a single SQL transaction",
     schedule=None,
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Ho_Chi_Minh"),
     catchup=False,
@@ -31,10 +31,10 @@ with DAG(
     default_args=default_args,
     tags=["gold", "etl", "dag4"],
 ) as dag:
-    # Không dùng Spark -> không cần giới hạn max_active_tis_per_dag.
-    # Không cần .expand(): chỉ 1 transaction SQL full-refresh duy nhất.
+    # No Spark involved -> no need for max_active_tis_per_dag.
+    # No .expand() needed: just a single full-refresh SQL transaction.
     run_etl = task(task_id="run_etl_silver_to_gold")(run_etl_silver_to_gold)()
     validate = task(task_id="validate_gold_load")(validate_gold_load)()
 
-    # Nối tường minh bằng >> — cả 2 hàm đều trả None, không có XCom truyền qua lại.
+    # Explicit >> chaining — both functions return None, no XCom passed between them.
     run_etl >> validate

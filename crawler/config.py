@@ -1,14 +1,17 @@
 """
 crawler/config.py
 
-Thành phần 1+2 — cấu hình riêng cho crawler (Dataset Loader + Web Crawler).
-Tham số chung (DSN Postgres, S3, AWS region) import từ config.py gốc.
+Component 1+2 — config specific to the crawler (Dataset Loader + Web Crawler).
+Shared params (Postgres DSN, S3, AWS region) imported from the root config.py.
 """
 
 import importlib.util
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+
+from bronze_paths import DATASET_PREFIX as _DEFAULT_DATASET_S3_PREFIX
+from bronze_paths import WEB_PREFIX as BRONZE_WEB_PREFIX
 
 _ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=_ENV_PATH)
@@ -27,17 +30,17 @@ def _float(name: str, default: float) -> float:
 def _require(name: str) -> str:
     value = os.getenv(name)
     if not value:
-        raise RuntimeError(f"Thiếu biến môi trường: {name}")
+        raise RuntimeError(f"Missing environment variable: {name}")
     return value
 
 
-# Import config gốc qua đường dẫn tuyệt đối (tránh phụ thuộc PYTHONPATH/cwd)
+# Import the root config via absolute path (avoids depending on PYTHONPATH/cwd).
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ROOT_CONFIG_PATH = _PROJECT_ROOT / "config.py"
 
 _spec = importlib.util.spec_from_file_location("root_config", _ROOT_CONFIG_PATH)
 if _spec is None or _spec.loader is None:
-    raise RuntimeError(f"Không tìm thấy config.py gốc tại: {_ROOT_CONFIG_PATH}")
+    raise RuntimeError(f"Root config.py not found at: {_ROOT_CONFIG_PATH}")
 root_config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(root_config)
 
@@ -56,15 +59,15 @@ PROXY_HEALTH_CHECK_TIMEOUT_SECONDS = _float("PROXY_HEALTH_CHECK_TIMEOUT_SECONDS"
 PROXY_HEALTH_CHECK_WORKERS = _int("PROXY_HEALTH_CHECK_WORKERS", 20)
 PROXY_MAX_CANDIDATES = _int("PROXY_MAX_CANDIDATES", 200)
 
-# Tham số riêng cho bước lấy danh sách proxy thô, tách khỏi timeout health-check.
+# Params for the raw proxy-list fetch step, separate from health-check timeout.
 PROXYSCRAPE_TIMEOUT_SECONDS = _float("PROXYSCRAPE_TIMEOUT_SECONDS", 15.0)
 PROXYSCRAPE_LIMIT = _int("PROXYSCRAPE_LIMIT", 500)
 GEONODE_TIMEOUT_SECONDS = _float("GEONODE_TIMEOUT_SECONDS", 15.0)
 GEONODE_LIMIT = _int("GEONODE_LIMIT", 100)
 
-# Crawl loop (Thành phần 2, DAG 2)
+# Crawl loop (Component 2, DAG 2)
 WEB_CRAWLER_MAX_DETAIL_PAGES_PER_RUN = _int("WEB_CRAWLER_MAX_DETAIL_PAGES_PER_RUN", 1000)
-# 45 phút — chừa buffer ~20 phút cho DAG 3+4 chạy xong trong cùng giờ.
+# 45 minutes — leaves ~20 min buffer for DAG 3+4 to finish within the same hour slot.
 WEB_CRAWLER_TIME_BOX_SECONDS = _int("WEB_CRAWLER_TIME_BOX_SECONDS", 45 * 60)
 WEB_CRAWLER_DELAY_MIN_SECONDS = _float("WEB_CRAWLER_DELAY_MIN_SECONDS", 5.0)
 WEB_CRAWLER_DELAY_MAX_SECONDS = _float("WEB_CRAWLER_DELAY_MAX_SECONDS", 10.0)
@@ -76,9 +79,11 @@ WEB_CRAWLER_RECONCILE_STALE_RUN_AFTER_SECONDS = _int(
     "WEB_CRAWLER_RECONCILE_STALE_RUN_AFTER_SECONDS", 2 * 60 * 60
 )
 
-# Dataset loader (Thành phần 1, DAG 1)
+# Dataset loader (Component 1, DAG 1)
 DATASET_CDN_BASE_URL = _require("DATASET_CDN_BASE_URL")
-DATASET_S3_PREFIX = os.getenv("DATASET_S3_PREFIX", "bronze/dataset/")
+# Default falls back to bronze_paths.DATASET_PREFIX — the single source of
+# truth for this prefix — rather than repeating the literal string here.
+DATASET_S3_PREFIX = os.getenv("DATASET_S3_PREFIX", _DEFAULT_DATASET_S3_PREFIX)
 DATASET_PROBE_TIMEOUT_SECONDS = _float("DATASET_PROBE_TIMEOUT_SECONDS", 20.0)
 DATASET_DOWNLOAD_TIMEOUT_SECONDS = _float("DATASET_DOWNLOAD_TIMEOUT_SECONDS", 60.0)
 DATASET_REQUEST_DELAY_SECONDS = _float("DATASET_REQUEST_DELAY_SECONDS", 2.0)

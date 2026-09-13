@@ -314,6 +314,25 @@ CREATE TABLE gold.dim_property_type (
     CONSTRAINT uq_dim_property_type UNIQUE (property_type_name, listing_type)
 );
 
+-- ----------------------------------------------------------------------
+-- Hàm suy 'source' ('dataset'|'web') từ prefix của source_bronze_key.
+-- Nguồn sự thật duy nhất cho phía SQL — thay thế 4 khối CASE WHEN từng lặp
+-- lại rải rác (2 lần trong etl_silver_to_gold.sql, 2 lần trong
+-- diagnose_gold_join_loss.sql). Logic PHẢI khớp 1:1 với hàm Python
+-- parser.bronze_to_silver_core.infer_source_from_bronze_key() — SQL và
+-- Python là 2 runtime khác nhau nên không thể dùng chung 1 hàm, nhưng ít
+-- nhất phía SQL giờ chỉ còn 1 nơi cần sửa nếu convention S3 key đổi.
+-- ----------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION gold.infer_source_from_bronze_key(p_source_bronze_key TEXT)
+RETURNS VARCHAR(20)
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT CASE
+        WHEN p_source_bronze_key LIKE 'bronze/dataset/%' THEN 'dataset'
+        WHEN p_source_bronze_key LIKE 'bronze/web/%' THEN 'web'
+        ELSE NULL
+    END
+$$;
+
 -- DIM_SOURCE — phục vụ lineage (dataset vs web).
 CREATE TABLE gold.dim_source (
     source_key    BIGSERIAL     PRIMARY KEY,
@@ -324,7 +343,7 @@ CREATE TABLE gold.dim_source (
 );
 
 COMMENT ON COLUMN gold.dim_source.source_name IS
-    'Suy từ prefix source_bronze_key qua hàm Python infer_source_from_bronze_key() — đổi convention S3 key phải sửa đồng bộ cả 2 nơi.';
+    'Suy từ prefix source_bronze_key qua gold.infer_source_from_bronze_key() (SQL) / infer_source_from_bronze_key() (Python, parser/bronze_to_silver_core.py) — đổi convention S3 key phải sửa đồng bộ CẢ 2 hàm.';
 
 -- DIM_PROPERTY_FEATURES — Junk dimension.
 CREATE OR REPLACE FUNCTION gold.compute_feature_key(
