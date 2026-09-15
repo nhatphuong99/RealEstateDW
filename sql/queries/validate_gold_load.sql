@@ -1,20 +1,21 @@
 -- ============================================================================
 -- sql/queries/validate_gold_load.sql
--- Validate sau khi chạy etl_silver_to_gold.sql.
+-- Validation run after etl_silver_to_gold.sql.
 --
--- Trả về 1 dòng/check (check_name, expected, actual, passed). Caller
--- (parser/silver_to_gold_io.py::validate_gold_load()) đọc toàn bộ dòng,
--- raise RuntimeError liệt kê check nào passed=FALSE -- Airflow đánh dấu
--- task fail thay vì âm thầm pass khi dữ liệu Gold sai lệch.
+-- Returns 1 row per check (check_name, expected, actual, passed). The
+-- caller (parser/silver_to_gold_io.py::validate_gold_load()) reads every
+-- row and raises RuntimeError listing which checks have passed=FALSE —
+-- Airflow marks the task failed instead of silently passing on bad Gold data.
 --
--- Nếu check_row_count_match FAIL (đặc biệt actual=0): chạy
--- sql/queries/diagnose_gold_join_loss.sql để biết chính xác JOIN nào (hay
--- schema-drift nào) đang làm rớt dòng, thay vì đoán.
+-- If check_row_count fails (especially actual=0): run
+-- sql/queries/diagnose_gold_join_loss.sql to find out exactly which JOIN
+-- (or schema drift) is dropping rows, instead of guessing.
 -- ============================================================================
 
 WITH check_row_count AS (
-    -- COUNT(fact) phải khớp COUNT(silver) tuyệt đối -- lộ ngay nếu Fact JOIN
-    -- rớt dòng (VD dim_source trả NULL) hoặc cả transaction bị abort.
+    -- COUNT(fact) must match COUNT(silver) exactly — immediately surfaces
+    -- a dropped-row JOIN in the Fact (e.g. dim_source returning NULL) or
+    -- the whole transaction being aborted.
     SELECT
         'row_count_match' AS check_name,
         (SELECT COUNT(*) FROM silver.listing_history)::TEXT AS expected,
@@ -23,8 +24,9 @@ WITH check_row_count AS (
             = (SELECT COUNT(*) FROM gold.fact_listing_price) AS passed
 ),
 check_current_uniqueness AS (
-    -- Đúng 1 dòng is_current=TRUE/listing_id -- Fact dùng UPSERT, dễ sót
-    -- logic nếu ETL chạy lại nhiều lần mà thiếu bước đóng version cũ.
+    -- Exactly 1 is_current=TRUE row per listing_id — the Fact uses UPSERT,
+    -- easy to get wrong if the "close out the old version" step is missing
+    -- across repeated runs.
     SELECT
         'is_current_unique_per_listing' AS check_name,
         '0' AS expected,
@@ -52,9 +54,10 @@ check_fk_not_null AS (
        OR posted_date_key IS NULL
 ),
 check_price_per_m2_flagged AS (
-    -- Cho phép outlier tồn tại, miễn đã đánh dấu price_is_outlier=TRUE ở
-    -- Silver. Chỉ báo lỗi khi có dòng vượt ngưỡng nhưng chưa được flag
-    -- -- nghĩa là parser bỏ sót, không phải dữ liệu xấu.
+    -- Outliers are allowed to exist, as long as they're already flagged
+    -- price_is_outlier=TRUE in Silver. Only flags an error when a row is
+    -- over the threshold but NOT flagged — meaning the parser missed it,
+    -- not that the data itself is bad.
     SELECT
         'price_per_m2_extreme_all_flagged' AS check_name,
         '0' AS expected,
@@ -66,9 +69,10 @@ check_price_per_m2_flagged AS (
       AND NOT price_is_outlier
 ),
 check_area_within_sanitized_bounds AS (
-    -- Regression guard cho _sanitize_area(): mọi area_m2 không NULL và
-    -- area_is_outlier=FALSE phải nằm trong [3, 10000] -- lọt ra ngoài
-    -- nghĩa là hàm sanitize đã bị sửa/hỏng, cần kiểm tra ngay.
+    -- Regression guard for _sanitize_area(): every non-NULL area_m2 with
+    -- area_is_outlier=FALSE must fall within [3, 10000] — anything outside
+    -- that range means the sanitize function has been changed/broken and
+    -- needs immediate attention.
     SELECT
         'area_within_sanitized_bounds' AS check_name,
         '0' AS expected,

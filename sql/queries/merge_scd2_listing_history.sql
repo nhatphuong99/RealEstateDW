@@ -1,30 +1,32 @@
 -- ============================================================================
 -- sql/queries/merge_scd2_listing_history.sql
--- Merge SCD Type 2: silver.listing_staging_batch -> silver.listing_history.
--- Chạy sau mỗi lần Spark ETL (Bronze->Silver) ghi xong 1 batch vào staging_batch.
+-- SCD Type 2 merge: silver.listing_staging_batch -> silver.listing_history.
+-- Runs after every Spark ETL (Bronze->Silver) writes a batch into staging_batch.
 --
--- Thiết kế: 3 bước UPDATE/INSERT tuần tự, KHÔNG gộp vào 1 câu MERGE (Postgres
--- MERGE không xử lý tốt kiểu "đóng dòng cũ + mở dòng mới" cùng lúc).
+-- Design: 3 sequential UPDATE/INSERT steps, NOT combined into a single
+-- MERGE statement (Postgres's MERGE doesn't handle "close the old row +
+-- open a new one" well in one pass).
 --
--- QUAN TRỌNG: kết quả LAG/LEAD được vật chất hóa 1 LẦN DUY NHẤT vào bảng tạm
--- (scd2_ordered/scd2_change_points/scd2_same_hash) TRƯỚC khi chạy 3 bước.
--- Nếu để mỗi bước tự tính lại CTE riêng, Bước 1 sẽ đổi is_current trên
--- listing_history TRƯỚC khi Bước 2/3 chạy -> CTE tính lại ở bước sau sẽ đọc
--- nhầm dữ liệu đã bị Bước 1 sửa. Bảng tạm tránh được lỗi này.
+-- IMPORTANT: the LAG/LEAD results are materialized ONCE into temp tables
+-- (scd2_ordered/scd2_change_points/scd2_same_hash) BEFORE running the 3
+-- steps. If each step recomputed its own CTE instead, step 1 would flip
+-- is_current on listing_history BEFORE steps 2/3 run -> a CTE recomputed
+-- afterward would read data already mutated by step 1. The temp tables
+-- avoid this class of bug.
 --
--- Toàn bộ script chạy trong 1 transaction để đảm bảo tính nguyên tử.
+-- The whole script runs in a single transaction for atomicity.
 -- ============================================================================
 
 BEGIN;
 
 -- ----------------------------------------------------------------------
--- Bảng tạm 1: combined (staging + anchor) + prev_hash qua LAG()
+-- Temp table 1: combined (staging + anchor) + prev_hash via LAG()
 -- ----------------------------------------------------------------------
 DROP TABLE IF EXISTS scd2_ordered;
 
 CREATE TEMP TABLE scd2_ordered AS
 WITH combined AS (
-    -- Toàn bộ quan sát MỚI trong batch (nguồn: Spark ETL Bronze->Silver)
+    -- Every NEW observation in this batch (source: the Spark Bronze->Silver ETL)
     SELECT
         listing_id, listing_url, source_part, source_bronze_key, crawl_date,
         row_hash, 'staging'::TEXT AS origin,
@@ -41,10 +43,12 @@ WITH combined AS (
 
     UNION ALL
 
-    -- Toàn bộ version đã có trong Silver (KHÔNG chỉ is_current), dùng làm
-    -- "mốc" (anchor) để LAG() biết prev_hash cho từng dòng staging. Lấy cả
-    -- lịch sử để rerun idempotent — nếu chỉ lấy is_current, staging trùng
-    -- 1 version cũ sẽ bị LAG() hiểu nhầm "lần đầu xuất hiện", tạo bản sao lỗi.
+    -- Every version already present in Silver (NOT just is_current), used
+    -- as the "anchor" so LAG() knows the prev_hash for each staging row.
+    -- Full history (not just is_current) is needed for idempotent
+    -- re-runs — if only is_current were used, a staging row matching an
+    -- older version would be misread by LAG() as "first ever appearance",
+    -- creating an incorrect duplicate.
     SELECT
         listing_id, listing_url, source_part, source_bronze_key,
         valid_from AS crawl_date,
@@ -64,16 +68,16 @@ SELECT
     combined.*,
     LAG(row_hash) OVER (
         PARTITION BY listing_id
-        ORDER BY crawl_date, origin  -- tie-break: 'anchor' < 'staging' (alphabet) -> anchor luôn đứng trước khi trùng crawl_date
+        ORDER BY crawl_date, origin  -- tie-break: 'anchor' < 'staging' alphabetically -> anchor always comes first on a tied crawl_date
     ) AS prev_hash
 FROM combined;
 
 -- ----------------------------------------------------------------------
--- Bảng tạm 2: change_points — chỉ dòng STAGING thực sự đổi hash so với
--- dòng liền trước (kể cả so với anchor). next_change_crawl_date/is_latest
--- tính TRÊN TẬP CON change_points (không tính trên scd2_ordered đầy đủ),
--- để valid_to nhảy thẳng tới điểm đổi kế tiếp, bỏ qua các quan sát hash
--- không đổi ở giữa.
+-- Temp table 2: change_points — only STAGING rows whose hash genuinely
+-- differs from the immediately preceding row (including vs. the anchor).
+-- next_change_crawl_date/is_latest are computed OVER the change_points
+-- SUBSET (not the full scd2_ordered), so valid_to jumps straight to the
+-- next actual change point, skipping over unchanged observations in between.
 -- ----------------------------------------------------------------------
 DROP TABLE IF EXISTS scd2_change_points;
 
@@ -87,8 +91,8 @@ WHERE o.origin = 'staging'
   AND o.prev_hash IS DISTINCT FROM o.row_hash;
 
 -- ----------------------------------------------------------------------
--- Bảng tạm 3: same_hash_rows — dòng staging KHÔNG đổi hash, chỉ cần cập
--- nhật last_seen_at (không sinh version mới).
+-- Temp table 3: same_hash_rows — staging rows whose hash did NOT change,
+-- only need last_seen_at bumped (no new version).
 -- ----------------------------------------------------------------------
 DROP TABLE IF EXISTS scd2_same_hash;
 
@@ -100,8 +104,9 @@ WHERE origin = 'staging'
 GROUP BY listing_id;
 
 -- ----------------------------------------------------------------------
--- Bước 1: đóng version is_current bị thay thế (chỉ listing_id có đổi hash
--- trong batch này). valid_to = điểm đổi ĐẦU TIÊN của listing_id đó.
+-- Step 1: close out the is_current version being replaced (only for
+-- listing_ids with a hash change in this batch). valid_to = that
+-- listing_id's FIRST change point.
 -- ----------------------------------------------------------------------
 UPDATE silver.listing_history h
 SET valid_to = cp.first_change_crawl_date,
@@ -115,10 +120,10 @@ WHERE h.listing_id = cp.listing_id
   AND h.is_current;
 
 -- ----------------------------------------------------------------------
--- Bước 2: insert toàn bộ change point thành version mới.
--- is_current chỉ TRUE cho change point mới nhất (is_latest) của mỗi
--- listing_id; valid_to = next_change_crawl_date (NULL cho bản mới nhất).
--- KHÔNG insert row_hash (GENERATED STORED, Postgres tự tính).
+-- Step 2: insert every change point as a new version.
+-- is_current is TRUE only for the most recent change point (is_latest) of
+-- each listing_id; valid_to = next_change_crawl_date (NULL for the latest
+-- version). row_hash is NOT inserted (GENERATED STORED, computed by Postgres).
 -- ----------------------------------------------------------------------
 INSERT INTO silver.listing_history (
     listing_id, listing_url, source_part, source_bronze_key,
@@ -151,8 +156,8 @@ SELECT
 FROM scd2_change_points;
 
 -- ----------------------------------------------------------------------
--- Bước 3: cập nhật last_seen_at cho các listing_id KHÔNG đổi hash trong
--- batch (không insert version mới, chỉ xác nhận lần crawl gần nhất).
+-- Step 3: bump last_seen_at for listing_ids whose hash did NOT change in
+-- this batch (no new version inserted, just confirms the latest crawl time).
 -- ----------------------------------------------------------------------
 UPDATE silver.listing_history h
 SET last_seen_at = s.max_crawl_date
@@ -163,5 +168,5 @@ WHERE h.listing_id = s.listing_id
 
 COMMIT;
 
--- Bảng tạm (scd2_ordered/scd2_change_points/scd2_same_hash) tự động biến
--- mất khi session psql/kết nối kết thúc — không cần DROP thủ công ở cuối.
+-- Temp tables (scd2_ordered/scd2_change_points/scd2_same_hash) are dropped
+-- automatically when the psql/connection session ends — no manual DROP needed.

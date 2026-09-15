@@ -10,7 +10,7 @@ RUN apt-get update \
 ENV JAVA_HOME=/usr/lib/jvm/default-java
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
-# JDBC driver — ghi/đọc Postgres qua .write.jdbc()/.read.jdbc().
+# JDBC driver — read/write Postgres through .write.jdbc()/.read.jdbc().
 RUN mkdir -p /opt/spark-jars \
     && curl -fL -o /opt/spark-jars/postgresql-42.7.13.jar \
        https://jdbc.postgresql.org/download/postgresql-42.7.13.jar \

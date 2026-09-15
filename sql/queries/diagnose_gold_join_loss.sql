@@ -1,16 +1,17 @@
 -- ============================================================================
 -- sql/queries/diagnose_gold_join_loss.sql
--- CÔNG CỤ CHẨN ĐOÁN — chạy khi validate_gold_load báo row_count_match lệch
--- (đặc biệt actual=0). Đếm riêng số dòng silver.listing_history không khớp
--- được với từng dimension ở etl_silver_to_gold.sql bước 6, để biết chính
--- xác JOIN nào đang làm rớt dòng thay vì phải đoán.
+-- DIAGNOSTIC TOOL — run when validate_gold_load reports row_count_match is
+-- off (especially actual=0). Counts, per dimension, how many
+-- silver.listing_history rows fail to join in etl_silver_to_gold.sql's
+-- step 6, so you know exactly which JOIN is dropping rows instead of
+-- guessing.
 --
--- CÁCH DÙNG: chạy sau khi etl_silver_to_gold.sql chạy xong (bước 1-5 đã nạp
--- Dim). Đọc "orphan_count" > 0 ở dim nào -> đó là nơi cần sửa.
+-- USAGE: run after etl_silver_to_gold.sql has finished (steps 1-5 already
+-- loaded the Dims). Any dim with "orphan_count" > 0 is where to look.
 -- ============================================================================
 
--- 1. Có bao nhiêu dòng Silver không khớp được gold.dim_location?
---    (dùng cùng điều kiện JOIN như etl_silver_to_gold.sql bước 6)
+-- 1. How many Silver rows fail to match gold.dim_location?
+--    (uses the same JOIN condition as etl_silver_to_gold.sql step 6)
 SELECT
     'dim_location' AS join_target,
     COUNT(*) AS orphan_count,
@@ -18,7 +19,7 @@ SELECT
         WHERE h.address_province_new IS NULL OR h.address_ward_new IS NULL
            OR h.address_province_old IS NULL OR h.address_ward_old IS NULL
            OR h.address_district_old IS NULL OR h.address_street_new IS NULL
-    ) AS orphan_with_real_null   -- >0 nghĩa là Silver có NULL thật (không phải '') ở cột địa chỉ
+    ) AS orphan_with_real_null   -- >0 means Silver has a genuine NULL (not '') in an address column
 FROM silver.listing_history h
 LEFT JOIN gold.dim_location loc
     ON loc.province_new = COALESCE(h.address_province_new, '')
@@ -31,7 +32,7 @@ WHERE loc.location_key IS NULL
 
 UNION ALL
 
--- 2. Có bao nhiêu dòng Silver không khớp được gold.dim_property_type?
+-- 2. How many Silver rows fail to match gold.dim_property_type?
 SELECT
     'dim_property_type' AS join_target,
     COUNT(*) AS orphan_count,
@@ -44,7 +45,7 @@ WHERE pt.property_type_key IS NULL
 
 UNION ALL
 
--- 3. Có bao nhiêu dòng Silver không khớp được gold.dim_source?
+-- 3. How many Silver rows fail to match gold.dim_source?
 SELECT
     'dim_source' AS join_target,
     COUNT(*) AS orphan_count,
@@ -57,9 +58,10 @@ WHERE src.source_key IS NULL
 
 UNION ALL
 
--- 4. Tổng dòng khớp được cả 3 dimension — số dòng thật sự sẽ INSERT vào
---    Fact. Nếu = 0 dù (1)+(2)+(3) đều = 0, khả năng cao lỗi ở code Python
---    (không execute đúng file SQL, hoặc sai DSN/schema search_path).
+-- 4. Total rows that match all 3 dimensions — the actual number of rows
+--    that will be INSERTed into the Fact. If this is 0 even though
+--    (1)+(2)+(3) are all 0, the issue is likely on the Python side (wrong
+--    SQL file executed, or a wrong DSN/schema search_path).
 SELECT
     'joined_all_3_dims' AS join_target,
     COUNT(*) AS orphan_count,
@@ -77,4 +79,3 @@ JOIN gold.dim_property_type pt
 JOIN gold.dim_source src
     ON src.source_name = gold.infer_source_from_bronze_key(h.source_bronze_key)
    AND src.source_part = h.source_part;
-

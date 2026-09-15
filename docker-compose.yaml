@@ -44,13 +44,13 @@
 #
 # Feel free to modify this file to suit your needs.
 
-# File này = bản docker-compose.yaml CHÍNH THỨC của Apache Airflow 3.3.0
+# This file is the official Apache Airflow 3.3.0 docker-compose.yaml
 # (https://airflow.apache.org/docs/apache-airflow/3.3.0/docker-compose.yaml)
-# + merge thêm service "postgres-dw" (Data Warehouse riêng của project)
-# + thêm network "real-estate-network" dùng chung cho toàn bộ service.
+# + merged with the project-specific "postgres-dw" service
+# + added the shared "real-estate-network" network for all services.
 #
-# WARNING: cấu hình này dành cho local development. KHÔNG dùng nguyên bản này
-# để deploy production.
+# WARNING: this configuration is for local development only. DO NOT use this
+# version directly for production deployment.
 
  
 ---
@@ -91,7 +91,7 @@ x-airflow-common:
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     PYTHONPATH: '/opt/airflow'
     JAVA_HOME: /usr/lib/jvm/default-java
-    SPARK_JARS_DIR: /opt/spark-jars   # parser/config.py glob toàn bộ jar trong này (JDBC)
+    SPARK_JARS_DIR: /opt/spark-jars   # parser/config.py globs all jars in this directory (JDBC)
 
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
@@ -102,6 +102,8 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/parser:/opt/airflow/parser
     - ${AIRFLOW_PROJ_DIR:-.}/sql:/opt/airflow/sql
     - ${AIRFLOW_PROJ_DIR:-.}/config.py:/opt/airflow/config.py
+    - ${AIRFLOW_PROJ_DIR:-.}/bronze_paths.py:/opt/airflow/bronze_paths.py
+    - ${AIRFLOW_PROJ_DIR:-.}/listing_taxonomy.py:/opt/airflow/listing_taxonomy.py
     - ${ENV_FILE_PATH:-.env}:/opt/airflow/.env:ro
   user: "${AIRFLOW_UID:-50000}:0"
   networks:
@@ -126,9 +128,9 @@ networks:
 services:
 
   # ------------------------------------------------------------------
-  # Data Warehouse của project (Silver/Gold) — TÁCH RIÊNG khỏi Postgres
-  # nội bộ của Airflow bên dưới, để không lẫn bảng nghiệp vụ với bảng
-  # metadata của Airflow.
+  # Project Data Warehouse (Silver/Gold) — separated from Airflow's own
+  # internal Postgres instance to avoid mixing business tables with
+  # Airflow metadata tables.
   # ------------------------------------------------------------------
   postgres-dw:
     image: postgres:16

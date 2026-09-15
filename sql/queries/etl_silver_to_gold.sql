@@ -1,34 +1,38 @@
 -- ============================================================================
 -- sql/queries/etl_silver_to_gold.sql
--- ETL Silver -> Gold: full-refresh idempotent, chạy trong 1 transaction.
--- "Full-refresh" = mỗi lần chạy quét lại TOÀN BỘ silver.listing_history,
--- không incremental theo thời gian. KHÔNG PHẢI truncate-and-reload (không
--- có TRUNCATE ở đây) — 5 Dim insert-only qua ON CONFLICT DO NOTHING (giữ
--- nguyên surrogate key giữa các lần chạy); riêng Fact dùng ON CONFLICT DO
--- UPDATE (upsert) vì silver.listing_history không bất biến không bất biến — 
--- merge_scd2_listing_history.sql có thể UPDATE is_current/valid_to 
--- của dòng đã tồn tại -> Gold phải phản ánh đúng, không chỉ insert-once.
+-- ETL Silver -> Gold: idempotent full-refresh, runs in a single transaction.
+-- "Full-refresh" = every run scans the ENTIRE silver.listing_history, not
+-- incremental by time. NOT truncate-and-reload (no TRUNCATE here) — the 5
+-- Dims are insert-only via ON CONFLICT DO NOTHING (surrogate keys stay
+-- stable across runs); the Fact uses ON CONFLICT DO UPDATE (upsert)
+-- because silver.listing_history is not immutable —
+-- merge_scd2_listing_history.sql can UPDATE is_current/valid_to on an
+-- existing row, and Gold must reflect that correctly, not just insert-once.
 --
--- Silver và Gold cùng 1 Postgres -> transform thẳng bằng SQL, không kéo
--- dữ liệu ra Spark/Python (khác Bronze->Silver, cần Spark parse HTML thô).
+-- Silver and Gold live in the same Postgres -> transform directly in SQL,
+-- no need to pull data out into Spark/Python (unlike Bronze->Silver, which
+-- needs Spark to parse raw HTML).
 --
--- Thứ tự bắt buộc: nạp 5 Dim trước (idempotent qua ON CONFLICT DO NOTHING),
--- rồi mới nạp Fact (JOIN lấy surrogate key).
+-- Order matters: load the 5 Dims first (idempotent via ON CONFLICT DO
+-- NOTHING), then load the Fact (JOIN to pick up surrogate keys).
 --
--- PHÒNG THỦ: cột CHUỖI feed vào dim_location/dim_property_features bọc
--- COALESCE(..., '') ở cả bước nạp Dim lẫn JOIN Fact, dù Silver đã NOT NULL
--- DEFAULT ''. Nếu 1 cột chuỗi thực sự NULL (regression/data cũ), không bọc
--- COALESCE sẽ khiến INSERT lỗi NOT NULL violation -> abort cả transaction 6
--- bước -> fact_listing_price rớt về 0 dòng dù Silver có đủ dữ liệu (triệu
--- chứng "row_count_match: expected=N, actual=0"). COALESCE biến lỗi cứng
--- thành 1 dòng dim hợp lệ dạng ''/'' — không sập batch, nhưng vẫn có thể
--- lệch dữ liệu; dùng diagnose_gold_join_loss.sql để điều tra nếu cần.
+-- DEFENSIVE CODING: every STRING column feeding dim_location/
+-- dim_property_features is wrapped in COALESCE(..., '') both when loading
+-- the Dims and when JOINing the Fact, even though Silver already enforces
+-- NOT NULL DEFAULT ''. If a string column is ever genuinely NULL
+-- (regression/legacy data), skipping the COALESCE would make the INSERT
+-- raise a NOT NULL violation -> aborts the whole 6-step transaction ->
+-- fact_listing_price drops to 0 rows even though Silver has plenty of
+-- data (the "row_count_match: expected=N, actual=0" symptom). COALESCE
+-- turns that hard failure into one valid ''/'' dim row instead — it won't
+-- crash the batch, but data can still be off; use
+-- diagnose_gold_join_loss.sql to investigate if needed.
 -- ============================================================================
 
 BEGIN;
 
 -- ----------------------------------------------------------------------
--- 1. DIM_DATE - lịch liên tục, phủ từ ngày nhỏ nhất đến lớn nhất trong posted_date
+-- 1. DIM_DATE - continuous calendar, spanning the min to max posted_date in Silver
 -- ----------------------------------------------------------------------
 INSERT INTO gold.dim_date (date_key, full_date)
 SELECT
@@ -42,7 +46,7 @@ FROM generate_series(
 ON CONFLICT (date_key) DO NOTHING;
 
 -- ----------------------------------------------------------------------
--- 2. DIM_LOCATION - COALESCE phòng thủ.
+-- 2. DIM_LOCATION - defensive COALESCE.
 -- ----------------------------------------------------------------------
 INSERT INTO gold.dim_location (province_new, ward_new, province_old, ward_old, district_old, street)
 SELECT DISTINCT
@@ -56,8 +60,8 @@ FROM silver.listing_history
 ON CONFLICT (province_new, ward_new, province_old, ward_old, district_old, street) DO NOTHING;
 
 -- ----------------------------------------------------------------------
--- 3. DIM_PROPERTY_TYPE - đúng 10 tổ hợp cố định. Không cần COALESCE:
---    property_type/listing_type NOT NULL vô điều kiện ở Silver.
+-- 3. DIM_PROPERTY_TYPE - exactly 10 fixed combinations. No COALESCE needed:
+--    property_type/listing_type are unconditionally NOT NULL in Silver.
 -- ----------------------------------------------------------------------
 INSERT INTO gold.dim_property_type (property_type_name, listing_type)
 SELECT DISTINCT property_type, listing_type
@@ -65,13 +69,14 @@ FROM silver.listing_history
 ON CONFLICT (property_type_name, listing_type) DO NOTHING;
 
 -- ----------------------------------------------------------------------
--- 4. DIM_SOURCE - suy source_name từ prefix source_bronze_key qua
--- gold.infer_source_from_bronze_key() (schema_full.sql) — nguồn sự thật
--- duy nhất phía SQL, dùng lại ở bước 6 khi JOIN Fact và trong
--- diagnose_gold_join_loss.sql. Vẫn phải khớp 1:1 với hàm Python
--- infer_source_from_bronze_key() (parser/bronze_to_silver_core.py) —
--- đổi convention S3 key phải sửa đồng bộ CẢ 2 hàm (SQL + Python), vì
--- SQL và Python là 2 runtime khác nhau, không thể dùng chung 1 hàm.
+-- 4. DIM_SOURCE - infer source_name from the source_bronze_key prefix via
+-- gold.infer_source_from_bronze_key() (schema_full.sql) — the single
+-- source of truth on the SQL side, reused in step 6's Fact JOIN and in
+-- diagnose_gold_join_loss.sql. Must still stay in sync with the Python
+-- function infer_source_from_bronze_key() (parser/bronze_to_silver_core.py)
+-- — changing the S3 key convention requires updating BOTH functions (SQL
+-- + Python) in sync, since SQL and Python are separate runtimes and can't
+-- share one function.
 -- ----------------------------------------------------------------------
 INSERT INTO gold.dim_source (source_name, source_part)
 SELECT DISTINCT
@@ -81,9 +86,10 @@ FROM silver.listing_history
 ON CONFLICT (source_name, source_part) DO NOTHING;
 
 -- ----------------------------------------------------------------------
--- 5. DIM_PROPERTY_FEATURES - feature_key GENERATED STORED (Postgres tự
---    tính qua gold.compute_feature_key()), KHÔNG insert cột này tay.
---    COALESCE phòng thủ cho orientation/legal_status — xem đầu file.
+-- 5. DIM_PROPERTY_FEATURES - feature_key is GENERATED STORED (computed by
+--    Postgres via gold.compute_feature_key()), NEVER insert this column
+--    manually. Defensive COALESCE for orientation/legal_status — see the
+--    file header.
 -- ----------------------------------------------------------------------
 INSERT INTO gold.dim_property_features (
     orientation, legal_status, has_dining_room, has_kitchen,
@@ -97,13 +103,15 @@ ON CONFLICT (feature_key) DO NOTHING;
 
 -- ----------------------------------------------------------------------
 -- 6. FACT_LISTING_PRICE - UPSERT.
---    JOIN lấy surrogate key từ Dim vừa nạp — điều kiện JOIN dùng CÙNG
---    COALESCE như bước 2/5, nếu không dim có '' nhưng Silver đưa NULL vào
---    so sánh ('' = NULL luôn UNKNOWN) sẽ làm JOIN rớt dòng dù dim đã tồn tại.
+--    Joins pick up the surrogate keys from the Dims just loaded — the
+--    JOIN conditions use the SAME COALESCE as steps 2/5; otherwise a Dim
+--    row with '' could fail to match Silver's NULL (`'' = NULL` is always
+--    UNKNOWN), dropping rows even though the Dim row already exists.
 --
---    feature_key gọi lại gold.compute_feature_key() thay vì JOIN
---    dim_property_features — hàm IMMUTABLE, NULL-safe, tránh JOIN rớt dòng
---    khi has_*/owner_direct là BOOLEAN nullable.
+--    feature_key is recomputed by calling gold.compute_feature_key()
+--    directly instead of JOINing dim_property_features — the function is
+--    IMMUTABLE and NULL-safe, avoiding dropped rows when has_*/owner_direct
+--    are nullable BOOLEANs.
 -- ----------------------------------------------------------------------
 INSERT INTO gold.fact_listing_price (
     listing_key, listing_id,

@@ -1,16 +1,21 @@
 -- ============================================================================
 -- sql/schema_full.sql
--- DDL hợp nhất toàn bộ database real_estate_dw (gộp từ 6 file 001-006).
--- Thứ tự: pipeline (control-plane) -> silver (SCD2) -> gold (star schema).
--- Idempotent: CREATE ... IF NOT EXISTS, chạy lại an toàn trên DB rỗng.
+-- Consolidated DDL for the entire real_estate_dw database 
+-- Order: pipeline (control-plane) -> silver (SCD2) -> gold (star schema).
+-- Idempotent: every CREATE TABLE/INDEX uses IF NOT EXISTS, every function
+-- uses CREATE OR REPLACE — safe to re-run this entire file as-is against
+-- an EMPTY database (fresh init) OR an EXISTING one (e.g. to pick up a
+-- newly added function/table without recreating what's already there).
+-- Re-running does NOT alter columns of tables that already exist — adding
+-- a column to an existing table still needs a manual ALTER TABLE.
 -- ============================================================================
 
 -- ============================================================================
--- 1. SCHEMA pipeline — control-plane cho DAG 1/2/3
+-- 1. SCHEMA pipeline — control-plane for DAG 1/2/3
 -- ============================================================================
 CREATE SCHEMA IF NOT EXISTS pipeline;
 
--- Con trỏ crawl trang danh sách (DAG 2)
+-- Listing-page crawl cursor (DAG 2)
 CREATE TABLE IF NOT EXISTS pipeline.listing_progress (
     id              SERIAL PRIMARY KEY,
     province_old    TEXT NOT NULL,
@@ -18,19 +23,19 @@ CREATE TABLE IF NOT EXISTS pipeline.listing_progress (
     property_type   TEXT NOT NULL,
     current_page    INT NOT NULL DEFAULT 1,
     status          TEXT NOT NULL DEFAULT 'active',   -- active / exhausted
-    crawl_date      DATE NOT NULL,                    -- reset mỗi ngày
+    crawl_date      DATE NOT NULL,                    -- reset every day
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (province_old, listing_type, property_type, crawl_date)
 );
 
--- Hàng đợi URL chi tiết (DAG 2)
--- Vòng đời: pending -> processing -> fetched -> flushed -> done (hoặc -> failed)
+-- Detail-page URL queue (DAG 2)
+-- Lifecycle: pending -> processing -> fetched -> flushed -> done (or -> failed)
 CREATE TABLE IF NOT EXISTS pipeline.detail_queue (
     id                  SERIAL PRIMARY KEY,
     url                 TEXT UNIQUE NOT NULL,
     status              TEXT NOT NULL DEFAULT 'pending',
     discovered_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    claimed_at          TIMESTAMPTZ,                  -- dùng để reset task treo quá lâu
+    claimed_at          TIMESTAMPTZ,                  -- used to reset tasks stuck too long
     discovered_page_id  INT REFERENCES pipeline.listing_progress(id),
     crawl_date          DATE NOT NULL
 );
@@ -39,7 +44,7 @@ CREATE INDEX IF NOT EXISTS idx_detail_queue_pending_fifo
     ON pipeline.detail_queue (discovered_at)
     WHERE status = 'pending';
 
--- Trạng thái mỗi lần chạy DAG 2
+-- State of each DAG 2 run
 CREATE TABLE IF NOT EXISTS pipeline.run_state (
     id                SERIAL PRIMARY KEY,
     run_id            TEXT UNIQUE NOT NULL,
@@ -47,10 +52,10 @@ CREATE TABLE IF NOT EXISTS pipeline.run_state (
     ended_at          TIMESTAMPTZ,
     stopped_reason    TEXT,
     detail_pages_done INT NOT NULL DEFAULT 0,
-    output_s3_key     TEXT                             -- chỉ để audit, không dùng lại trong logic
+    output_s3_key     TEXT                             -- audit only, not read back by any logic
 );
 
--- Trạng thái tải từng part CDN cố định (DAG 1)
+-- Download state of each fixed CDN part (DAG 1)
 CREATE TABLE IF NOT EXISTS pipeline.dataset_part_state (
     part_number   INT PRIMARY KEY,                     -- 1..77
     status        TEXT NOT NULL DEFAULT 'pending',      -- pending/done/failed
@@ -69,7 +74,7 @@ CREATE INDEX IF NOT EXISTS idx_dataset_part_state_pending
     ON pipeline.dataset_part_state (part_number)
     WHERE status IN ('pending', 'failed');
 
--- Trạng thái parse từng file Bronze (DAG 3)
+-- Parse state of each Bronze file (DAG 3)
 CREATE TABLE IF NOT EXISTS pipeline.bronze_file_state (
     s3_key            TEXT PRIMARY KEY,
     source            TEXT NOT NULL,                   -- 'dataset' | 'web'
@@ -85,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_bronze_file_state_pending
     ON pipeline.bronze_file_state (discovered_at)
     WHERE status = 'pending';
 
--- Timezone mặc định toàn DB
+-- Default timezone for the whole DB
 ALTER DATABASE real_estate_dw SET timezone TO 'Asia/Ho_Chi_Minh';
 
 -- ============================================================================
@@ -93,7 +98,7 @@ ALTER DATABASE real_estate_dw SET timezone TO 'Asia/Ho_Chi_Minh';
 -- ============================================================================
 CREATE SCHEMA IF NOT EXISTS silver;
 
--- Hàm tính row_hash — nguồn sự thật duy nhất để phát hiện thay đổi (SCD2 trigger).
+-- Computes row_hash — the single source of truth for change detection (SCD2 trigger).
 CREATE OR REPLACE FUNCTION silver.compute_row_hash(
     p_price_vnd NUMERIC,
     p_price_is_negotiable BOOLEAN,
@@ -111,32 +116,32 @@ LANGUAGE sql IMMUTABLE AS $$
     )
 $$;
 
--- Lịch sử tin đăng, 1 dòng = 1 phiên bản giá (SCD2 trên 5 trường: price_vnd,
--- price_is_negotiable, is_expired, has_warning, area_m2).
-CREATE TABLE silver.listing_history (
+-- Listing history, 1 row = 1 observed price version (SCD2 on 5 fields:
+-- price_vnd, price_is_negotiable, is_expired, has_warning, area_m2).
+CREATE TABLE IF NOT EXISTS silver.listing_history (
     listing_key BIGSERIAL PRIMARY KEY,
     listing_id BIGINT NOT NULL,
     listing_url TEXT NOT NULL,
     source_part VARCHAR(50) NOT NULL,
-    source_bronze_key TEXT NOT NULL,       -- S3 key sinh ra version này (debug/trace)
-    valid_from TIMESTAMPTZ NOT NULL,        -- mốc SCD2 = thời điểm crawl phát hiện version này
-    valid_to TIMESTAMPTZ,                    -- NULL = chưa từng crawl lại lần 2 để xác nhận
+    source_bronze_key TEXT NOT NULL,       -- S3 key that produced this version (debug/trace)
+    valid_from TIMESTAMPTZ NOT NULL,        -- SCD2 timestamp = when this version was first crawled
+    valid_to TIMESTAMPTZ,                    -- NULL = never re-crawled a second time to confirm
     is_current BOOLEAN NOT NULL DEFAULT TRUE,
-    last_seen_at TIMESTAMPTZ NOT NULL,        -- cập nhật khi crawl lại mà hash không đổi
+    last_seen_at TIMESTAMPTZ NOT NULL,        -- updated on re-crawl when the hash hasn't changed
 
-    title TEXT NOT NULL,                       -- chỉ audit, không dùng ở Gold
+    title TEXT NOT NULL,                       -- audit only, not used in Gold
     listing_type VARCHAR(10) NOT NULL,
     property_type VARCHAR(50) NOT NULL,
-    posted_date DATE NOT NULL,                  -- trend axis chính dùng ở Gold
+    posted_date DATE NOT NULL,                  -- main trend axis used in Gold
 
-    price_vnd NUMERIC(16,0),                     -- NULL khi price_is_negotiable=TRUE
+    price_vnd NUMERIC(16,0),                     -- NULL when price_is_negotiable=TRUE
     price_raw TEXT,
     price_is_negotiable BOOLEAN NOT NULL DEFAULT FALSE,
 
     area_m2 NUMERIC(10,2),
     area_raw TEXT,
     area_is_undetermined BOOLEAN NOT NULL DEFAULT FALSE,
-    area_is_outlier BOOLEAN NOT NULL DEFAULT FALSE,   -- area_m2 gốc ngoài [3, 10.000] m2, đã null hóa
+    area_is_outlier BOOLEAN NOT NULL DEFAULT FALSE,   -- raw area_m2 outside [3, 10,000] m2, nulled out
 
     price_per_m2_vnd NUMERIC(15,2)
         GENERATED ALWAYS AS (
@@ -144,7 +149,7 @@ CREATE TABLE silver.listing_history (
                  THEN NULL ELSE ROUND(price_vnd/area_m2,2) END
         ) STORED,
 
-    price_is_outlier BOOLEAN NOT NULL DEFAULT FALSE,   -- giá/m2 > 5 tỷ; price_vnd giữ nguyên, không null hóa
+    price_is_outlier BOOLEAN NOT NULL DEFAULT FALSE,   -- price/m2 > 5B VND; price_vnd kept as-is, not nulled
 
     length_m NUMERIC(6,2),
     width_m NUMERIC(6,2),
@@ -155,7 +160,7 @@ CREATE TABLE silver.listing_history (
     orientation VARCHAR(20) NOT NULL DEFAULT '',
     legal_status VARCHAR(50) NOT NULL DEFAULT '',
 
-    -- Tri-state: TRUE = có icon check | NULL = không xác định (site không có ký hiệu phủ định)
+    -- Tri-state: TRUE = check icon present | NULL = undetermined (site has no negation marker)
     has_dining_room BOOLEAN,
     has_kitchen BOOLEAN,
     has_rooftop BOOLEAN,
@@ -169,10 +174,10 @@ CREATE TABLE silver.listing_history (
     address_ward_new VARCHAR(100) NOT NULL DEFAULT '',
     address_province_new VARCHAR(100) NOT NULL DEFAULT '',
 
-    address_old_raw TEXT NOT NULL DEFAULT '',    -- chỉ audit ở Silver, không xuống Gold
+    address_old_raw TEXT NOT NULL DEFAULT '',    -- Silver audit only, not carried into Gold
     address_ward_old VARCHAR(100) NOT NULL DEFAULT '',
     address_district_old VARCHAR(100) NOT NULL DEFAULT '',
-    address_province_old VARCHAR(100) NOT NULL DEFAULT '',   -- KHÔNG dùng để lọc scope
+    address_province_old VARCHAR(100) NOT NULL DEFAULT '',   -- NOT used for scope filtering
 
     row_hash CHAR(32)
         GENERATED ALWAYS AS (
@@ -187,26 +192,27 @@ CREATE TABLE silver.listing_history (
     ingested_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Quy ước: cột CHUỖI NOT NULL DEFAULT '' khi thiếu ('' luôn UNKNOWN trong SQL,
--- khai báo thẳng ở DDL để lỗi lộ ngay, không trôi xuống Gold). Cột SỐ/BOOLEAN
--- giữ NULL đúng nghĩa "thiếu".
+-- Convention: STRING columns are NOT NULL DEFAULT '' when missing (declared
+-- directly in the DDL so violations surface immediately instead of drifting
+-- into Gold). NUMERIC/BOOLEAN columns keep NULL to mean "missing".
 
-CREATE UNIQUE INDEX ux_listing_history_current       -- đảm bảo mỗi listing_id chỉ 1 bản is_current
+CREATE UNIQUE INDEX IF NOT EXISTS ux_listing_history_current       -- guarantees exactly 1 is_current row per listing_id
     ON silver.listing_history (listing_id)
     WHERE is_current;
 
-CREATE INDEX idx_listing_history_id_valid_from        -- phục vụ LAG() khi merge SCD2
+CREATE INDEX IF NOT EXISTS idx_listing_history_id_valid_from        -- supports LAG() during the SCD2 merge
     ON silver.listing_history (listing_id, valid_from);
 
--- Landing zone tạm 1 batch Spark parse. Cùng cột listing_history, trừ cột chỉ
--- sinh khi vào listing_history (listing_key, valid_from, valid_to, is_current,
--- last_seen_at, ingested_at) — thay vào đó giữ crawl_date làm nguồn cho valid_from.
+-- Temporary landing zone for one Spark parse batch. Same columns as
+-- listing_history, minus the ones only generated when merged into it
+-- (listing_key, valid_from, valid_to, is_current, last_seen_at,
+-- ingested_at) — crawl_date is kept instead, as the source for valid_from.
 CREATE UNLOGGED TABLE IF NOT EXISTS silver.listing_staging_batch (
     listing_id           BIGINT       NOT NULL,
     listing_url          TEXT         NOT NULL,
     source_part          VARCHAR(50)  NOT NULL,
     source_bronze_key    TEXT         NOT NULL,
-    crawl_date           TIMESTAMPTZ  NOT NULL,   -- sẽ trở thành valid_from khi merge vào listing_history
+    crawl_date           TIMESTAMPTZ  NOT NULL,   -- becomes valid_from when merged into listing_history
 
     title                TEXT         NOT NULL,
     listing_type         VARCHAR(10)  NOT NULL,
@@ -262,19 +268,19 @@ CREATE UNLOGGED TABLE IF NOT EXISTS silver.listing_staging_batch (
 );
 
 COMMENT ON TABLE silver.listing_staging_batch IS
-    'Landing zone tạm/batch, UNLOGGED, TRUNCATE trước mỗi lần chạy — mất dữ liệu khi crash chấp nhận được vì Bronze immutable, chạy lại ETL là đủ.';
+    'Temporary per-batch landing zone, UNLOGGED, TRUNCATEd before every run — losing data on a crash is acceptable since Bronze is immutable and re-running the ETL is enough.';
 
 CREATE INDEX IF NOT EXISTS idx_staging_listing_id_crawl_date
     ON silver.listing_staging_batch (listing_id, crawl_date);
 
--- Bản ghi Bronze parse thất bại (HTML lệch cấu trúc, thiếu field bắt buộc...)
+-- Records that failed to parse from Bronze (malformed HTML, missing required field...)
 CREATE TABLE IF NOT EXISTS silver.parse_quarantine (
     id                 BIGSERIAL    PRIMARY KEY,
     url                TEXT         NOT NULL,
     crawl_date         TIMESTAMPTZ  NOT NULL,
     source_bronze_key  TEXT         NOT NULL,
     error_reason       TEXT         NOT NULL,
-    raw_html           BYTEA,                    -- giữ để debug, khỏi đọc lại S3
+    raw_html           BYTEA,                    -- kept for debugging, avoids re-reading from S3
     quarantined_at     TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
@@ -282,22 +288,22 @@ CREATE INDEX IF NOT EXISTS idx_parse_quarantine_source_key
     ON silver.parse_quarantine (source_bronze_key);
 
 -- ============================================================================
--- 3. SCHEMA gold — Star Schema Kimball (Fact Observation-grain, 1:1 listing_history)
+-- 3. SCHEMA gold — Kimball Star Schema (Observation-grain Fact, 1:1 with listing_history)
 -- ============================================================================
 CREATE SCHEMA IF NOT EXISTS gold;
 
--- DIM_DATE — bảng ngày.
-CREATE TABLE gold.dim_date (
+-- DIM_DATE — date dimension.
+CREATE TABLE IF NOT EXISTS gold.dim_date (
     date_key      INTEGER      PRIMARY KEY,   -- YYYYMMDD
     full_date     DATE         NOT NULL UNIQUE
 );
 
--- DIM_LOCATION — bảng địa chỉ.
-CREATE TABLE gold.dim_location (
+-- DIM_LOCATION — address dimension.
+CREATE TABLE IF NOT EXISTS gold.dim_location (
     location_key    BIGSERIAL     PRIMARY KEY,
     province_new     VARCHAR(100)  NOT NULL DEFAULT '',
     ward_new         VARCHAR(100)  NOT NULL DEFAULT '',
-    province_old      VARCHAR(100)  NOT NULL DEFAULT '',   -- có thể KHÁC province_new (sáp nhập địa giới)
+    province_old      VARCHAR(100)  NOT NULL DEFAULT '',   -- may DIFFER from province_new (administrative merger)
     ward_old         VARCHAR(100)  NOT NULL DEFAULT '',
     district_old      VARCHAR(100)  NOT NULL DEFAULT '',
     street            VARCHAR(200)  NOT NULL DEFAULT '',
@@ -305,8 +311,8 @@ CREATE TABLE gold.dim_location (
     CONSTRAINT uq_dim_location UNIQUE (province_new, ward_new, province_old, ward_old, district_old, street)
 );
 
--- DIM_PROPERTY_TYPE — 10 tổ hợp cố định (5 property_type x 2 listing_type).
-CREATE TABLE gold.dim_property_type (
+-- DIM_PROPERTY_TYPE — 10 fixed combinations (5 property_type x 2 listing_type).
+CREATE TABLE IF NOT EXISTS gold.dim_property_type (
     property_type_key    BIGSERIAL     PRIMARY KEY,
     property_type_name    VARCHAR(50)   NOT NULL,
     listing_type           VARCHAR(10)   NOT NULL,
@@ -315,13 +321,7 @@ CREATE TABLE gold.dim_property_type (
 );
 
 -- ----------------------------------------------------------------------
--- Hàm suy 'source' ('dataset'|'web') từ prefix của source_bronze_key.
--- Nguồn sự thật duy nhất cho phía SQL — thay thế 4 khối CASE WHEN từng lặp
--- lại rải rác (2 lần trong etl_silver_to_gold.sql, 2 lần trong
--- diagnose_gold_join_loss.sql). Logic PHẢI khớp 1:1 với hàm Python
--- parser.bronze_to_silver_core.infer_source_from_bronze_key() — SQL và
--- Python là 2 runtime khác nhau nên không thể dùng chung 1 hàm, nhưng ít
--- nhất phía SQL giờ chỉ còn 1 nơi cần sửa nếu convention S3 key đổi.
+-- Infers 'source' ('dataset'|'web') from the source_bronze_key prefix.
 -- ----------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION gold.infer_source_from_bronze_key(p_source_bronze_key TEXT)
 RETURNS VARCHAR(20)
@@ -333,8 +333,8 @@ LANGUAGE sql IMMUTABLE AS $$
     END
 $$;
 
--- DIM_SOURCE — phục vụ lineage (dataset vs web).
-CREATE TABLE gold.dim_source (
+-- DIM_SOURCE — lineage (dataset vs web).
+CREATE TABLE IF NOT EXISTS gold.dim_source (
     source_key    BIGSERIAL     PRIMARY KEY,
     source_name    VARCHAR(20)   NOT NULL,   -- 'dataset' | 'web'
     source_part     VARCHAR(50)   NOT NULL,
@@ -343,9 +343,9 @@ CREATE TABLE gold.dim_source (
 );
 
 COMMENT ON COLUMN gold.dim_source.source_name IS
-    'Suy từ prefix source_bronze_key qua gold.infer_source_from_bronze_key() (SQL) / infer_source_from_bronze_key() (Python, parser/bronze_to_silver_core.py) — đổi convention S3 key phải sửa đồng bộ CẢ 2 hàm.';
+    'Inferred from the source_bronze_key prefix via gold.infer_source_from_bronze_key() (SQL) / infer_source_from_bronze_key() (Python, parser/bronze_to_silver_core.py) — changing the S3 key convention requires updating BOTH functions in sync.';
 
--- DIM_PROPERTY_FEATURES — Junk dimension.
+-- DIM_PROPERTY_FEATURES — junk dimension.
 CREATE OR REPLACE FUNCTION gold.compute_feature_key(
     p_orientation VARCHAR,
     p_legal_status VARCHAR,
@@ -367,7 +367,7 @@ LANGUAGE sql IMMUTABLE AS $$
     )
 $$;
 
-CREATE TABLE gold.dim_property_features (
+CREATE TABLE IF NOT EXISTS gold.dim_property_features (
     orientation        VARCHAR(20)   NOT NULL DEFAULT '',
     legal_status        VARCHAR(50)   NOT NULL DEFAULT '',
     has_dining_room     BOOLEAN,
@@ -384,10 +384,10 @@ CREATE TABLE gold.dim_property_features (
     ) STORED PRIMARY KEY
 );
 
--- FACT_LISTING_PRICE — 1 dòng = 1 version giá đã quan sát, khớp 1:1 silver.listing_history.
-CREATE TABLE gold.fact_listing_price (
-    listing_key       BIGINT        PRIMARY KEY,   -- map thẳng silver.listing_history.listing_key
-    listing_id         BIGINT        NOT NULL,       -- degenerate dimension, trace về Silver/Bronze
+-- FACT_LISTING_PRICE — 1 row = 1 observed price version, 1:1 with silver.listing_history.
+CREATE TABLE IF NOT EXISTS gold.fact_listing_price (
+    listing_key       BIGINT        PRIMARY KEY,   -- maps directly to silver.listing_history.listing_key
+    listing_id         BIGINT        NOT NULL,       -- degenerate dimension, traces back to Silver/Bronze
 
     location_key         BIGINT   NOT NULL REFERENCES gold.dim_location (location_key),
     property_type_key     BIGINT   NOT NULL REFERENCES gold.dim_property_type (property_type_key),
@@ -395,12 +395,12 @@ CREATE TABLE gold.fact_listing_price (
     source_key             BIGINT   NOT NULL REFERENCES gold.dim_source (source_key),
     posted_date_key         INTEGER  NOT NULL REFERENCES gold.dim_date (date_key),
 
-    valid_from        TIMESTAMPTZ  NOT NULL,   -- lineage/audit, không phải trend axis
+    valid_from        TIMESTAMPTZ  NOT NULL,   -- lineage/audit only, not the trend axis
     valid_to          TIMESTAMPTZ,
     is_current        BOOLEAN      NOT NULL,
 
-    price_vnd            NUMERIC(16, 0),          -- NULL khi price_is_negotiable=TRUE
-    price_per_m2_vnd       NUMERIC(15, 2),          -- copy từ Silver, không tính lại
+    price_vnd            NUMERIC(16, 0),          -- NULL when price_is_negotiable=TRUE
+    price_per_m2_vnd       NUMERIC(15, 2),          -- copied from Silver, not recomputed
     area_m2                NUMERIC(10, 2),
 
     bedrooms              SMALLINT,
@@ -410,7 +410,7 @@ CREATE TABLE gold.fact_listing_price (
     street_width_m          NUMERIC(6, 2),
 
     price_is_negotiable      BOOLEAN NOT NULL,
-    price_is_outlier            BOOLEAN NOT NULL,   -- mirror Silver, lọc khi AVG/SUM
+    price_is_outlier            BOOLEAN NOT NULL,   -- mirrors Silver, filter on this for AVG/SUM
     area_is_undetermined      BOOLEAN NOT NULL,
     area_is_outlier            BOOLEAN NOT NULL,
     has_warning              BOOLEAN NOT NULL,
@@ -418,46 +418,50 @@ CREATE TABLE gold.fact_listing_price (
 );
 
 COMMENT ON TABLE gold.fact_listing_price IS
-    'Tính AVG(price_per_m2_vnd) nên lọc price_is_negotiable=false và price_is_outlier=false tường minh.';
+    'When computing AVG(price_per_m2_vnd), always filter price_is_negotiable=false and price_is_outlier=false explicitly.';
 
-CREATE INDEX idx_fact_location            ON gold.fact_listing_price (location_key);
-CREATE INDEX idx_fact_property_type       ON gold.fact_listing_price (property_type_key);
-CREATE INDEX idx_fact_posted_date         ON gold.fact_listing_price (posted_date_key);
-CREATE INDEX idx_fact_listing_id          ON gold.fact_listing_price (listing_id);
-CREATE INDEX idx_fact_current             ON gold.fact_listing_price (is_current) WHERE is_current;
+CREATE INDEX IF NOT EXISTS idx_fact_location            ON gold.fact_listing_price (location_key);
+CREATE INDEX IF NOT EXISTS idx_fact_property_type       ON gold.fact_listing_price (property_type_key);
+CREATE INDEX IF NOT EXISTS idx_fact_posted_date         ON gold.fact_listing_price (posted_date_key);
+CREATE INDEX IF NOT EXISTS idx_fact_listing_id          ON gold.fact_listing_price (listing_id);
+CREATE INDEX IF NOT EXISTS idx_fact_current             ON gold.fact_listing_price (is_current) WHERE is_current;
 
 -- ============================================================================
--- 4. Tầng BI (Metabase) — KHÔNG đụng dữ liệu Silver/Gold gốc
+-- 4. BI layer (Metabase) — does NOT touch the underlying Silver/Gold data
 -- ============================================================================
 
--- Crosswalk Quận/Huyện cũ -> tên khớp GeoJSON (snapshot cũ trước khi lên TP)
+-- Old district -> GeoJSON-matching name crosswalk (older snapshot, before
+-- district-to-city upgrades)
 CREATE TABLE IF NOT EXISTS gold.map_district_geo_crosswalk (
     district_old         VARCHAR(100)  PRIMARY KEY,
     geojson_ten_day_du     VARCHAR(100)  NOT NULL,
     ghi_chu                TEXT
 );
 
+-- NOTE: the values below are real Vietnamese administrative place names —
+-- intentionally left untranslated, they must match GeoJSON map data exactly.
 INSERT INTO gold.map_district_geo_crosswalk (district_old, geojson_ten_day_du, ghi_chu) VALUES
-    ('Thành phố Bến Cát',  'Thị xã Bến Cát',  'GeoJSON snapshot trước 01/05/2024'),
-    ('Thành phố Dĩ An',    'Thị xã Dĩ An',    'GeoJSON snapshot trước 2020'),
-    ('Thành phố Thuận An', 'Thị xã Thuận An', 'GeoJSON snapshot trước 2020'),
-    ('Thành phố Tân Uyên', 'Thị xã Tân Uyên', 'GeoJSON snapshot trước 2023'),
-    ('Thành phố Phú Mỹ',   'Huyện Phú Mỹ',    'GeoJSON snapshot trước khi lên TP')
+    ('Thành phố Bến Cát',  'Thị xã Bến Cát',  'GeoJSON snapshot predates 2024-05-01'),
+    ('Thành phố Dĩ An',    'Thị xã Dĩ An',    'GeoJSON snapshot predates 2020'),
+    ('Thành phố Thuận An', 'Thị xã Thuận An', 'GeoJSON snapshot predates 2020'),
+    ('Thành phố Tân Uyên', 'Thị xã Tân Uyên', 'GeoJSON snapshot predates 2023'),
+    ('Thành phố Phú Mỹ',   'Huyện Phú Mỹ',    'GeoJSON snapshot predates the district-to-city upgrade')
 ON CONFLICT (district_old) DO NOTHING;
 
--- Crosswalk Phường/Xã mới -> tên khớp GeoJSON (data quality issue nguồn alonhadat)
+-- New ward -> GeoJSON-matching name crosswalk (data quality issue from the alonhadat source)
 CREATE TABLE IF NOT EXISTS gold.map_ward_geo_crosswalk (
     ward_new              VARCHAR(100)  PRIMARY KEY,
     geojson_ten_day_du     VARCHAR(100)  NOT NULL,
     ghi_chu                TEXT
 );
 
+-- NOTE: values below are real Vietnamese administrative place names — kept untranslated.
 INSERT INTO gold.map_ward_geo_crosswalk (ward_new, geojson_ten_day_du, ghi_chu) VALUES
-    ('Phường Hóc Môn', 'Xã Hóc Môn', 'Tên chính thức theo NQ 1685/NQ-UBTVQH15 (01/07/2025) là Xã Hóc Môn')
+    ('Phường Hóc Môn', 'Xã Hóc Môn', 'Official name per Resolution 1685/NQ-UBTVQH15 (2025-07-01) is Xã Hóc Môn')
 ON CONFLICT (ward_new) DO NOTHING;
 
--- View phẳng — nguồn chính cho mọi Question Metabase. Grain = fact_listing_price.
--- Chuẩn hóa Unicode NFC 2 chiều khi so khớp GeoJSON (tránh lệch NFC/NFD).
+-- Flat view — the primary source for every Metabase Question. Grain = fact_listing_price.
+-- Normalizes Unicode to NFC on both sides when matching against GeoJSON (avoids NFC/NFD mismatches).
 CREATE OR REPLACE VIEW gold.vw_fact_report AS
 SELECT
     f.listing_key, f.listing_id,
@@ -470,7 +474,7 @@ SELECT
 
     dl.province_new, dl.ward_new, dl.province_old, dl.ward_old, dl.district_old, dl.street,
 
-    -- Map key cho region map Metabase (đã qua crosswalk + NFC nếu cần)
+    -- Map key for Metabase region maps (already passed through the crosswalk + NFC where applicable)
     COALESCE(mw.geojson_ten_day_du, NORMALIZE(dl.ward_new, NFC)) AS ward_new_map_key,
     COALESCE(md.geojson_ten_day_du, NORMALIZE(dl.district_old, NFC)) AS district_old_map_key,
 
