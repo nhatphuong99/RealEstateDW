@@ -322,5 +322,5 @@ Bộ dữ liệu seed lịch sử private và CDN endpoint tương ứng đượ
 **Nguyễn Lý Nhật Phương**
 
 - **GitHub:** [nhatphuong99](https://github.com/nhatphuong99)
-- **Email:** [Nhatphuong NL](mailto:nlnhatphuong@gmai.com)
+- **Email:** [Nhatphuong NL](mailto:nlnhatphuong@gmail.com)
 

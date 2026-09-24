@@ -25,7 +25,7 @@ derby.log
 metastore_db/
 
 # --- Data / local artifacts (không commit dữ liệu thật hoặc file tạm) ---
-*.parquet
+# *.parquet
 *.csv
 /tmp/
 scripts/output/

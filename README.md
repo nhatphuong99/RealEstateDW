@@ -322,4 +322,4 @@ The private bulk seed dataset and its CDN endpoint are intentionally omitted fro
 **Phuong Nguyen Ly Nhat**
 
 - **GitHub:** [nhatphuong99](https://github.com/nhatphuong99)
-- **Email:** [Nhatphuong NL](mailto:nlnhatphuong@gmai.com)
+- **Email:** [Nhatphuong NL](mailto:nlnhatphuong@gmail.com)
