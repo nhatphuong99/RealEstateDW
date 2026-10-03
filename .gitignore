@@ -39,3 +39,7 @@ metabase.db*
 .idea/
 .vscode/
 *.swp
+
+
+analytics/qa/_out/
+analytics/qa/*.md
