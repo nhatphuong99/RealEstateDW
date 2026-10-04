@@ -40,9 +40,10 @@ step1 AS (
             WHEN l.province_old ILIKE '%Bình Dương%' THEN 'binh_duong_old'
             ELSE 'hcm_old'
         END AS region_group,
-        -- Tỷ lệ diện tích / (dài x ngang); chỉ tính khi kích thước hợp lệ
+        -- Tỷ lệ diện tích / (dài x ngang); chỉ tính khi kích thước đáng tin:
+        -- dài x ngang < 20 m2 coi là kích thước giả (vd 1 x 1, 2 x 5 thay cho 5 x 20), xem qa/06_r7_diagnose.sql
         CASE
-            WHEN l.length_m > 0 AND l.width_m > 0
+            WHEN l.length_m > 0 AND l.width_m > 0 AND l.length_m * l.width_m >= 20
                 THEN l.area_m2 / (l.length_m * l.width_m)
         END AS area_ratio,
         CASE

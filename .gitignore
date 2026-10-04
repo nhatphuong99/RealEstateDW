@@ -42,4 +42,5 @@ metabase.db*
 
 
 analytics/qa/_out/
-analytics/qa/*.md
+analytics/*/*.md
+analytics/*.md

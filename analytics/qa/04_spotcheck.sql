@@ -46,6 +46,7 @@ SELECT
     f.is_current,
     f.posted_date,
     f.price_vnd,
+    f.area_m2,
     f.is_expired,
     s.row_hash AS row_hash_silver,
     (v.listing_key IS NOT NULL) AS in_versions,
@@ -59,7 +60,7 @@ FROM gold.vw_fact_report AS f
 LEFT JOIN analytics.vw_listing_versions AS v ON v.listing_key = f.listing_key
 LEFT JOIN analytics.vw_listing_latest AS l ON l.listing_key = f.listing_key
 LEFT JOIN silver.listing_history AS s ON s.listing_key = f.listing_key
-WHERE f.listing_id = 16871015   -- đổi 0 thành listing_id
+WHERE f.listing_id = 0   -- đổi 0 thành listing_id
 ORDER BY f.valid_from, f.listing_key;
 
 -- ===== E3. 2 listing area_suspect: 1 nhóm tỷ lệ [8,12), 1 nhóm [80,120) =====

@@ -54,7 +54,7 @@ SELECT
     COUNT(*) FILTER (WHERE deal_type = 'rent' AND price_per_m2_vnd >= 10000000) AS r4_rent_ge_10m,
     COUNT(*) FILTER (WHERE deal_type = 'rent' AND price_vnd >= 1000000000) AS r5_commercial,
     COUNT(*) FILTER (WHERE deal_type = 'rent' AND price_per_m2_vnd < 10000) AS r6_rent_lt_10k,
-    COUNT(*) FILTER (WHERE length_m > 0 AND width_m > 0
+    COUNT(*) FILTER (WHERE length_m > 0 AND width_m > 0 AND length_m * width_m >= 20
                        AND ((area_m2 / (length_m * width_m) >= 8 AND area_m2 / (length_m * width_m) < 12)
                          OR (area_m2 / (length_m * width_m) >= 80 AND area_m2 / (length_m * width_m) < 120))) AS r7_area_suspect,
     COUNT(*) FILTER (WHERE deal_type = 'rent' AND price_per_m2_vnd >= 10000000
@@ -114,7 +114,6 @@ FROM analytics.vw_listing_latest AS l
 JOIN silver.listing_history AS s ON s.listing_key = l.listing_key
 WHERE l.deal_type = 'rent' AND l.is_usable AND l.price_per_m2_vnd < 10000
 ORDER BY l.price_per_m2_vnd;
-
 
 -- D8a. R5 (thuê, giá >= 1 tỷ/tháng) trên các cơ sở đếm khác nhau, so với 118 của E5
 SELECT
