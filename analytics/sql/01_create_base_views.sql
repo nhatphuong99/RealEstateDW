@@ -158,7 +158,9 @@ SELECT
     n.price_vnd,
     n.prev_price_vnd,
     n.prev_source_name,
-    (n.valid_from::date - n.prev_valid_from::date) AS days_since_prev_version,
+    -- Ép múi giờ VN để kết quả giống nhau ở DataGrip và Metabase (múi giờ phiên có thể khác)
+    ((n.valid_from AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
+        - (n.prev_valid_from AT TIME ZONE 'Asia/Ho_Chi_Minh')::date) AS days_since_prev_version,
     (
         n.prev_price_vnd IS NOT NULL
         AND n.price_vnd IS NOT NULL
