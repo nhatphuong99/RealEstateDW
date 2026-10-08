@@ -82,7 +82,10 @@ WITH cell AS (
 )
 SELECT
     ward_new AS phuong,
-    area_band AS nhom_dien_tich,
+    CASE area_band
+        WHEN '1_lt_40' THEN 'Dưới 40 m²' WHEN '2_40_60' THEN '40 – 60 m²'
+        WHEN '3_60_100' THEN '60 – 100 m²' WHEN '4_ge_100' THEN 'Từ 100 m² trở lên'
+    END AS nhom_dien_tich,
     n_mt,
     n_hem,
     ROUND((100 * (median_mt_vnd / median_hem_vnd - 1))::numeric, 1) AS premium_pct
@@ -120,7 +123,10 @@ qualified AS (
     WHERE n_mt >= 30 AND n_hem >= 30
 )
 SELECT
-    area_band AS nhom_dien_tich,
+    CASE area_band
+        WHEN '1_lt_40' THEN 'Dưới 40 m²' WHEN '2_40_60' THEN '40 – 60 m²'
+        WHEN '3_60_100' THEN '60 – 100 m²' WHEN '4_ge_100' THEN 'Từ 100 m² trở lên'
+    END AS nhom_dien_tich,
     COUNT(*) AS so_phuong,
     ROUND((100 * percentile_cont(0.5) WITHIN GROUP (ORDER BY premium))::numeric, 1) AS premium_median_pct
 FROM qualified
@@ -150,7 +156,10 @@ WITH cell AS (
 )
 SELECT
     ward_new AS phuong,
-    area_band AS nhom_dien_tich,
+    CASE area_band
+        WHEN '1_lt_40' THEN 'Dưới 40 m²' WHEN '2_40_60' THEN '40 – 60 m²'
+        WHEN '3_60_100' THEN '60 – 100 m²' WHEN '4_ge_100' THEN 'Từ 100 m² trở lên'
+    END AS nhom_dien_tich,
     ROUND((median_mt_vnd / 1e6)::numeric, 2) AS median_mat_tien_trieu_m2,
     ROUND((median_hem_vnd / 1e6)::numeric, 2) AS median_hem_trieu_m2,
     ROUND((100 * (median_mt_vnd / median_hem_vnd - 1))::numeric, 1) AS premium_pct,
