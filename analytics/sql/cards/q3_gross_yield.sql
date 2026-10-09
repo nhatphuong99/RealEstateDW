@@ -8,7 +8,7 @@
 -- KHÔNG đặt alias cho analytics.vw_listing_latest. Card nào cũng lặp lại CTE `cell`.
 -- Chạy thử trên DataGrip: xóa các dòng [[AND {{...}}]] hoặc thay bằng điều kiện thật.
 
--- CARD 1: "Tổng quan theo loại hình" (Table 3 dòng): median yield của các quận đạt n >= 30 ở cả hai vế
+-- CARD 1: "Tổng quan theo loại hình" (Table 3 dòng; KHÔNG có biến {{loai_hinh}}, không nối bộ lọc Loại BĐS): median yield của các quận đạt n >= 30 ở cả hai vế
 WITH cell AS (
     SELECT
         region_group,
@@ -24,7 +24,6 @@ WITH cell AS (
     WHERE is_analysis_ready
       AND property_type_name IN ('Căn hộ chung cư', 'Nhà mặt tiền', 'Nhà trong hẻm')
       AND district_old IS NOT NULL
-      [[AND {{loai_hinh}}]]
       [[AND {{nguon}}]]
       [[AND {{vung}}]]
     GROUP BY region_group, district_old, property_type_name

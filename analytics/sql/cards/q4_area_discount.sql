@@ -1,10 +1,11 @@
 -- analytics/sql/cards/q4_area_discount.sql
 -- Tab Q4 "Chiết khấu giá/m² theo diện tích" (docs/metrics.md mục 3).
+-- Chỉ tin bán (ghi cứng deal_type = 'sale', không có bộ lọc Loại tin): Q4 phục vụ người mua, và trộn bán với thuê sẽ lẫn hai đơn vị giá.
 -- Ô = (region_group, deal_type, property_type_name, district_old, area_band).
--- Chiết khấu = median(nhóm) / median(nhóm cơ sở 2_40_60) - 1, trong CÙNG loại tin × loại hình × quận.
+-- Chiết khấu = median(nhóm) / median(nhóm cơ sở 2_40_60) - 1, trong CÙNG loại hình × quận.
 -- Chỉ giữ ô có n >= 30 ở cả nhóm đang xét lẫn nhóm cơ sở. Chỉ số tổng = median chiết khấu của các ô đạt.
 -- Field Filter (Dropdown), map vào analytics.vw_listing_latest:
---   {{loai_tin}} -> deal_type (Required, mặc định sale), {{loai_hinh}} -> property_type_name, {{quan}} -> district_old
+--   {{loai_hinh}} -> property_type_name, {{quan}} -> district_old
 -- KHÔNG đặt alias cho analytics.vw_listing_latest. Card nào cũng lặp lại CTE.
 -- Chạy thử trên DataGrip: xóa các dòng [[AND {{...}}]] hoặc thay bằng điều kiện thật.
 
@@ -18,7 +19,7 @@ WITH cell AS (
     WHERE is_analysis_ready
       AND area_band IS NOT NULL
       AND district_old IS NOT NULL
-      [[AND {{loai_tin}}]]
+      AND deal_type = 'sale'
       [[AND {{loai_hinh}}]]
       [[AND {{quan}}]]
     GROUP BY region_group, deal_type, property_type_name, district_old, area_band
@@ -55,7 +56,7 @@ WITH cell AS (
     WHERE is_analysis_ready
       AND area_band IS NOT NULL
       AND district_old IS NOT NULL
-      [[AND {{loai_tin}}]]
+      AND deal_type = 'sale'
       [[AND {{loai_hinh}}]]
       [[AND {{quan}}]]
     GROUP BY region_group, deal_type, property_type_name, district_old, area_band
@@ -82,3 +83,42 @@ FROM cell c
 JOIN base b USING (region_group, deal_type, property_type_name, district_old)
 WHERE c.area_band <> '2_40_60' AND c.n >= 30
 ORDER BY c.property_type_name, c.district_old, c.area_band;
+
+-- CARD 3: "Chiết khấu theo loại hình" (Bar nhóm: X = nhóm diện tích, series = loại hình)
+-- KHÔNG có biến {{loai_hinh}} (không nối bộ lọc Loại BĐS; chỉ nối {{quan}}). Tách loại hình vì số gộp bị chi phối bởi nhà phố; căn hộ có thể đi ngược chiều.
+WITH cell AS (
+    SELECT
+        region_group, deal_type, property_type_name, district_old, area_band,
+        COUNT(*) AS n,
+        percentile_cont(0.5) WITHIN GROUP (ORDER BY price_per_m2_vnd) AS median_vnd
+    FROM analytics.vw_listing_latest
+    WHERE is_analysis_ready
+      AND area_band IS NOT NULL
+      AND district_old IS NOT NULL
+      AND deal_type = 'sale'
+      [[AND {{quan}}]]
+    GROUP BY region_group, deal_type, property_type_name, district_old, area_band
+),
+base AS (
+    SELECT region_group, deal_type, property_type_name, district_old, median_vnd AS base_vnd
+    FROM cell
+    WHERE area_band = '2_40_60' AND n >= 30
+),
+qualified AS (
+    SELECT c.property_type_name, c.area_band, c.median_vnd / b.base_vnd - 1 AS discount
+    FROM cell c
+    JOIN base b USING (region_group, deal_type, property_type_name, district_old)
+    WHERE c.area_band <> '2_40_60' AND c.n >= 30
+)
+SELECT
+    property_type_name AS loai_hinh,
+    CASE area_band
+        WHEN '1_lt_40' THEN 'Dưới 40 m²' WHEN '3_60_100' THEN '60 – 100 m²'
+        WHEN '4_ge_100' THEN 'Từ 100 m² trở lên'
+    END AS nhom_dien_tich,
+    COUNT(*) AS so_o,
+    ROUND((100 * percentile_cont(0.5) WITHIN GROUP (ORDER BY discount))::numeric, 1) AS chiet_khau_median_pct
+FROM qualified
+GROUP BY property_type_name, area_band
+-- Xếp theo nhóm diện tích trước: Metabase lấy thứ tự trục X theo lần xuất hiện đầu tiên
+ORDER BY area_band, property_type_name;

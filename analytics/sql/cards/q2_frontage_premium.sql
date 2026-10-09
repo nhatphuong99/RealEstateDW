@@ -36,7 +36,7 @@ qualified AS (
 SELECT ROUND((100 * percentile_cont(0.5) WITHIN GROUP (ORDER BY premium))::numeric, 1) AS premium_median_pct
 FROM qualified;
 
--- CARD 2: "Số ô (phường × nhóm diện tích) đạt n >= 30 ở cả hai nhóm" (Table một dòng)
+-- CARD 2: "Số ô đủ mẫu" (Number)
 WITH cell AS (
     SELECT
         ward_new,
@@ -53,13 +53,32 @@ WITH cell AS (
       [[AND {{nhom_dien_tich}}]]
     GROUP BY ward_new, area_band
 )
-SELECT
-    COUNT(*) AS so_o_dat,
-    COUNT(DISTINCT ward_new) AS so_phuong_dat
+SELECT COUNT(*) AS so_o_dat
 FROM cell
 WHERE n_mt >= 30 AND n_hem >= 30;
 
--- CARD 3: "Premium cao nhất" (Table một dòng: phường, nhóm diện tích, premium %)
+-- CARD 2B: "Số phường đủ mẫu" (Number)
+WITH cell AS (
+    SELECT
+        ward_new,
+        area_band,
+        COUNT(*) FILTER (WHERE property_type_name = 'Nhà mặt tiền') AS n_mt,
+        COUNT(*) FILTER (WHERE property_type_name = 'Nhà trong hẻm') AS n_hem
+    FROM analytics.vw_listing_latest
+    WHERE is_analysis_ready
+      AND deal_type = 'sale'
+      AND property_type_name IN ('Nhà mặt tiền', 'Nhà trong hẻm')
+      AND ward_new IS NOT NULL
+      AND area_band IS NOT NULL
+      [[AND {{vung}}]]
+      [[AND {{nhom_dien_tich}}]]
+    GROUP BY ward_new, area_band
+)
+SELECT COUNT(DISTINCT ward_new) AS so_phuong_dat
+FROM cell
+WHERE n_mt >= 30 AND n_hem >= 30;
+
+-- CARD 3: "5 ô có premium cao nhất" (Table 5 dòng: phường, nhóm diện tích, n, premium %)
 WITH cell AS (
     SELECT
         ward_new,
@@ -92,7 +111,7 @@ SELECT
 FROM cell
 WHERE n_mt >= 30 AND n_hem >= 30
 ORDER BY median_mt_vnd / median_hem_vnd DESC
-LIMIT 1;
+LIMIT 5;
 
 -- CARD 4: "Premium theo nhóm diện tích" (Bar; trục X = nhom_dien_tich)
 -- Thay cho "cột theo quận" của wireframe: ward_new (phường mới) không lồng trong district_old (quận cũ),
