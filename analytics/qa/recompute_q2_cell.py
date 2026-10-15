@@ -1,11 +1,11 @@
 """analytics/qa/recompute_q2_cell.py
 
-Tính lại premium mặt tiền so với hẻm của MỘT ô Q2 (phường × nhóm diện tích) bằng pandas,
-để so với card Q2 và SQL. Chạy tay từ thư mục gốc project, không đưa vào pipeline:
+Recomputes the frontage-vs-alley premium of ONE Q2 cell (ward x area band) with pandas,
+to cross-check the Q2 card and the SQL. Run manually from the project root (not part of the pipeline):
     python analytics/qa/recompute_q2_cell.py
-Muốn kiểm ô khác thì sửa 2 hằng số WARD và AREA_BAND ngay trong file này
-(không truyền tiếng Việt qua dòng lệnh, tránh lỗi mã hóa trên Windows).
-Đọc analytics/qa/_out/latest_ready.csv (xuất từ analytics.vw_listing_latest, is_analysis_ready).
+To check another cell, edit the WARD and AREA_BAND constants below
+(Vietnamese text is not passed on the command line to avoid Windows encoding issues).
+Reads analytics/qa/_out/latest_ready.csv (exported from analytics.vw_listing_latest, is_analysis_ready).
 """
 import argparse
 import sys
@@ -24,7 +24,7 @@ def main() -> int:
     ap.add_argument("--raw", default="analytics/qa/_out/latest_ready.csv")
     args = ap.parse_args()
 
-    # Đọc mọi cột dạng text để giữ nguyên chuỗi, chỉ ép kiểu số cho giá/m²
+    # Read all columns as text to keep strings intact; only price per m2 is cast to numeric
     df = pd.read_csv(args.raw, dtype=str, keep_default_na=False)
     df["price_per_m2_vnd"] = pd.to_numeric(df["price_per_m2_vnd"])
 

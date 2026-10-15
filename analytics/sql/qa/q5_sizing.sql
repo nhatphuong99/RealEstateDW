@@ -1,9 +1,9 @@
 -- analytics/sql/qa/q5_sizing.sql
--- Đo cỡ mẫu Q5 trước khi dựng card. Chỉ đọc analytics.vw_listing_versions.
--- Cặp = hai version liền kề của cùng listing_id, sắp theo valid_from (không dùng valid_to, is_current).
--- Chạy từng khối một trong DataGrip (bôi đen khối rồi Ctrl+Enter).
+-- Q5 sample sizing before building the cards. Read-only on analytics.vw_listing_versions.
+-- Pair = two adjacent versions of the same listing_id ordered by valid_from (valid_to / is_current not used).
+-- Run one block at a time in DataGrip (select the block, Ctrl+Enter).
 
--- KHỐI 1: số cặp theo hướng nguồn và số cặp đổi giá
+-- BLOCK 1: pairs by source direction, and counts of price changes
 WITH ordered AS (
     SELECT
         listing_id,
@@ -30,7 +30,7 @@ WHERE prev_valid_from IS NOT NULL
 GROUP BY 1
 ORDER BY 1;
 
--- KHỐI 2: phân phối % đổi giá của cặp dataset -> web có đổi giá (tìm giá trị bất thường trước khi đặt giới hạn)
+-- BLOCK 2: % price change distribution of dataset -> web pairs with a change (look for extreme values before setting chart limits)
 WITH ordered AS (
     SELECT
         listing_id,
@@ -59,7 +59,7 @@ SELECT
     ROUND((100 * MAX(pct))::numeric, 1) AS max_pct
 FROM changed;
 
--- KHỐI 3: khoảng cách ngày giữa hai lần quan sát (ngày theo múi giờ VN, cùng cách với Q6 CARD 5)
+-- BLOCK 3: day gap between the two observations (Vietnam time zone dates, same as Q6 CARD 5)
 WITH ordered AS (
     SELECT
         source_name,

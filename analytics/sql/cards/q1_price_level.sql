@@ -1,12 +1,12 @@
 -- analytics/sql/cards/q1_price_level.sql
--- Tab Q1 "Mặt bằng giá/m²". Chỉ số: median, p25, p75, n; ẩn nhóm n < 30 (docs/metrics.md mục 3).
--- Field Filter (Dropdown), map vào analytics.vw_listing_latest:
---   {{loai_tin}} -> listing_type, {{loai_hinh}} -> property_type_name, {{nguon}} -> source_name, {{vung}} -> region_group
--- KHÔNG đặt alias cho analytics.vw_listing_latest. Luôn GROUP BY deal_type để không trộn bán và thuê;
--- đơn vị hiển thị: bán = triệu VND/m², thuê = nghìn VND/m²/tháng.
--- Chạy thử trên DataGrip: xóa các dòng [[AND {{...}}]] hoặc thay bằng điều kiện thật.
+-- Tab Q1 "Mặt bằng giá/m²": median, p25, p75, n; groups with n < 30 are hidden (docs/metrics.md section 3).
+-- Field Filters (Dropdown) mapped to analytics.vw_listing_latest:
+--   loai_tin -> listing_type, loai_hinh -> property_type_name, nguon -> source_name, vung -> region_group
+-- Do not alias analytics.vw_listing_latest. Always GROUP BY deal_type so sale and rent are never mixed.
+-- Display units: sale = million VND/m2, rent = thousand VND/m2/month.
+-- To test in DataGrip: remove the optional [[AND ...]] filter lines or replace them with real conditions.
 
--- CARD 1: "Tổng quan" (Table một dòng mỗi loại tin)
+-- CARD 1 "Tổng quan": one row per listing type (Table)
 WITH base AS (
     SELECT
         listing_type,
@@ -33,7 +33,7 @@ SELECT
 FROM base
 ORDER BY listing_type;
 
--- CARD 2: "Bảng quận" (Table, xếp giảm dần theo median); chỉ nhóm n >= 30
+-- CARD 2 "Bảng quận": district table sorted by median descending (Table); only groups with n >= 30
 WITH base AS (
     SELECT
         listing_type,
@@ -63,8 +63,8 @@ SELECT
 FROM base
 ORDER BY listing_type, median_vnd DESC;
 
--- CARD 3: "Bản đồ phường: median giá/m² bán" (Region map, bản đồ phường sau sáp nhập trong maps/)
--- Chỉ tin bán (phường chỉ có ý nghĩa cho nhà mặt tiền, hẻm, biệt thự); nên đặt {{loai_hinh}} Required, mặc định "Nhà trong hẻm"
+-- CARD 3 "Bản đồ phường: median giá/m² bán": ward region map (post-merger ward GeoJSON in maps/)
+-- Sale only (wards matter for frontage, alley and villa); set loai_hinh Required, default "Nhà trong hẻm"
 SELECT
     ward_new_map_key AS phuong,
     COUNT(*) AS n,

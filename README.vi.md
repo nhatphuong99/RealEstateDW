@@ -43,6 +43,7 @@ Repository có screenshot dashboard và Airflow trong thư mục [`assets/`](ass
   - [Điểm nhấn kỹ thuật](#điểm-nhấn-kỹ-thuật)
   - [Chất lượng \& độ tin cậy dữ liệu](#chất-lượng--độ-tin-cậy-dữ-liệu)
   - [Dashboard](#dashboard)
+  - [Tầng Analytics](#tầng-analytics)
   - [Điều phối](#điều-phối)
   - [Cấu trúc thư mục](#cấu-trúc-thư-mục)
   - [Hướng dẫn chạy thử](#hướng-dẫn-chạy-thử)
@@ -233,6 +234,10 @@ Xây dựng trên Metabase — 3 tab, 13 card, dùng chung 1 view báo cáo (`go
 **Phân bố — giá trung bình/m² theo loại hình BĐS:**
 ![Giá trung bình/m² theo loại hình BĐS](assets/dashboard/06_avg_price_by_property_type.png)
 
+## Tầng Analytics
+
+Pipeline trên được mở rộng bằng một tầng analytics chỉ đọc phục vụ BI: ba view PostgreSQL trong schema `analytics` (chỉ dựng trên Gold, không sửa Silver, Gold hay các DAG) và dashboard Metabase 7 tab về mặt bằng giá, premium mặt tiền, gross yield, chiết khấu theo diện tích, đổi giá, độ tin cậy dữ liệu và độ ổn định theo tuần. Dashboard 3 tab, 13 card ở trên không thay đổi. Phần này có README riêng: xem [`analytics/`](analytics/README.md).
+
 ## Điều phối
 
 ![Danh sách 4 DAG Airflow kèm lịch sử chạy](assets/airflow/dags_overview.png)
@@ -243,6 +248,9 @@ Airflow điều phối 4 DAG, retry task lỗi và cung cấp khả năng quan s
 
 ```
 RealEstateDW/
+├── analytics/              # Tầng analytics chỉ đọc + dashboard Metabase v2 (có README riêng)
+│   └── README.md
+│
 ├── assets/                 # Ảnh dùng cho README (sơ đồ ERD, screenshot dashboard + Airflow)
 │   ├── erd/star_schema.png
 │   ├── dashboard/*.png

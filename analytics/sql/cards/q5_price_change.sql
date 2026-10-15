@@ -1,14 +1,14 @@
 -- analytics/sql/cards/q5_price_change.sql
--- Tab Q5 "Listing được web gặp lại có đổi giá không". Chỉ đọc analytics.vw_listing_versions (đã loại version trùng hash).
--- Cặp = version trước (dataset) và version sau (web) của cùng listing_id; chỉ giữ cặp có CẢ HAI giá > 0.
--- Đổi giá = price_vnd <> prev_price_vnd. pct = (giá mới - giá cũ) / giá cũ, tính trong SQL (không dùng cột price_change_pct của view).
--- Mẫu chỉ gồm cặp khác hash (cặp giống hash đã bị loại ở view), nên KHÔNG có tỷ lệ "listing gặp lại có đổi giá"
--- và không đại diện thị trường (docs/metrics.md mục 7 và 10).
--- Field Filter (Dropdown), map vào analytics.vw_listing_latest: {{loai_tin}} -> listing_type
--- KHÔNG đặt alias cho analytics.vw_listing_latest (vw_listing_versions thì được đặt alias v). Card nào cũng lặp lại CTE `pairs`.
--- Chạy thử trên DataGrip: xóa dòng [[AND {{loai_tin}}]] hoặc thay bằng điều kiện thật.
+-- Tab Q5 "Listing được web gặp lại có đổi giá không". Reads analytics.vw_listing_versions (consecutive duplicate hashes already removed).
+-- Pair = previous (dataset) and next (web) version of the same listing_id; only pairs with BOTH prices > 0.
+-- Price change = price_vnd <> prev_price_vnd. pct = (new - old) / old, computed here (not the view's price_change_pct).
+-- The sample only has pairs with different hashes, so there is NO "share of revisited listings that changed price",
+-- and it does not represent the market (docs/metrics.md sections 7 and 10).
+-- Field Filter (Dropdown) mapped to analytics.vw_listing_latest: loai_tin -> listing_type
+-- Do not alias analytics.vw_listing_latest (alias v on vw_listing_versions is fine). Every card repeats the pairs CTE.
+-- To test in DataGrip: remove the optional [[AND ...]] line or replace it with a real condition.
 
--- CARD 1: "Số cặp có đổi giá" (Number)
+-- CARD 1 "Số cặp có đổi giá": number of pairs with a price change (Number)
 WITH pairs AS (
     SELECT
         v.days_since_prev_version AS gap_ngay,
@@ -28,7 +28,7 @@ SELECT COUNT(*) AS so_cap_doi_gia
 FROM pairs
 WHERE price_vnd <> prev_price_vnd;
 
--- CARD 2: "Tỷ lệ cặp giảm giá (trong số cặp có đổi giá)" (Number, định dạng %; ẩn khi n < 30)
+-- CARD 2 "Tỷ lệ cặp giảm giá": share of decreases among pairs with a change (Number, %); hidden when n < 30
 WITH pairs AS (
     SELECT
         v.days_since_prev_version AS gap_ngay,
@@ -51,7 +51,7 @@ SELECT
 FROM pairs
 WHERE price_vnd <> prev_price_vnd;
 
--- CARD 3: "Phân vị % đổi giá" (Table một dòng: n, p25, median, p75; ẩn khi n < 30; KHÔNG dùng mean)
+-- CARD 3 "Phân vị % đổi giá": one-row table n, p25, median, p75; hidden when n < 30; no mean (Table)
 WITH pairs AS (
     SELECT
         v.days_since_prev_version AS gap_ngay,
@@ -75,8 +75,9 @@ SELECT
 FROM pairs
 WHERE price_vnd <> prev_price_vnd;
 
--- CARD 4: "Phân bố mức đổi giá" (Bar; trục X = nhom_doi_gia; hai đầu mở để thấy đuôi bất thường)
--- Hai đầu đối xứng (<= -50% và >= +50%) để khớp khối C của q5_qa.sql. Luôn đủ 9 nhóm (nhóm rỗng = 0); ẩn cả card khi tổng số cặp đổi giá < 30. ORDER BY nhom_no vì Metabase xếp trục X theo lần xuất hiện đầu tiên.
+-- CARD 4 "Phân bố mức đổi giá": distribution of price changes (Bar; X = nhom_doi_gia); open-ended tails expose outliers
+-- Symmetric tails (<= -50%, >= +50%) match block C of sql/qa/q5_qa.sql. Always 9 buckets (empty = 0);
+-- the card is hidden when changed pairs < 30. ORDER BY nhom_no: Metabase orders the X axis by first appearance.
 WITH pairs AS (
     SELECT
         v.days_since_prev_version AS gap_ngay,
@@ -123,8 +124,8 @@ WHERE (SELECT COUNT(*) FROM changed) >= 30
 GROUP BY b.nhom_no, b.nhom_doi_gia
 ORDER BY b.nhom_no;
 
--- CARD 5: "Khoảng cách giữa hai lần quan sát" (Table; ẩn median khi số cặp đổi giá của nhóm < 30)
--- so_cap = mọi cặp có cả hai giá > 0 (cặp khác hash vì lý do bất kỳ); KHÔNG tính tỷ lệ đổi giá (mẫu đã lọc theo hash).
+-- CARD 5 "Khoảng cách giữa hai lần quan sát": gap between the two observations (Table); median hidden when the group's changed pairs < 30
+-- so_cap = all pairs with both prices > 0 (different hash for any reason); no change rate (the sample is filtered by hash).
 WITH pairs AS (
     SELECT
         v.days_since_prev_version AS gap_ngay,

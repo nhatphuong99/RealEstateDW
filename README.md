@@ -43,6 +43,7 @@ The repository includes dashboard and Airflow screenshots under [`assets/`](asse
   - [Engineering Highlights](#engineering-highlights)
   - [Data Quality \& Reliability](#data-quality--reliability)
   - [Dashboard](#dashboard)
+  - [Analytics Layer](#analytics-layer)
   - [Orchestration](#orchestration)
   - [Project Structure](#project-structure)
   - [Getting Started](#getting-started)
@@ -233,6 +234,10 @@ Built in Metabase — 3 tabs, 13 cards, backed by a single reporting view (`gold
 **Distribution — average price/m² by property type:**
 ![Average price per m² by property type](assets/dashboard/06_avg_price_by_property_type.png)
 
+## Analytics Layer
+
+The pipeline above is extended with a read-only analytics layer for BI use: three PostgreSQL views in the `analytics` schema (built only on Gold, no changes to Silver, Gold or the DAGs) and a 7-tab Metabase dashboard covering price levels, frontage premium, gross yield, area discount, price changes, data reliability and weekly stability. The 3-tab, 13-card dashboard above is unchanged. This part has its own README: see [`analytics/`](analytics/README.md) (Vietnamese).
+
 ## Orchestration
 
 ![Airflow DAGs overview — 4 DAGs with run history](assets/airflow/dags_overview.png)
@@ -243,6 +248,9 @@ Airflow coordinates the four DAGs, retries failed tasks, and provides visibility
 
 ```
 RealEstateDW/
+├── analytics/              # Read-only analytics layer + Metabase dashboard v2 (own README)
+│   └── README.md
+│
 ├── assets/                 # README images (ERD diagram, dashboard + Airflow screenshots)
 │   ├── erd/star_schema.png
 │   ├── dashboard/*.png

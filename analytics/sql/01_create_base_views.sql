@@ -1,25 +1,20 @@
 -- analytics/sql/01_create_base_views.sql
--- Chạy (PowerShell, từ thư mục gốc project):
+-- Creates schema analytics and its 3 views. Read-only on gold.vw_fact_report and pipeline.run_state.
+-- Idempotent (CREATE OR REPLACE). Run from the project root (PowerShell):
 --   $env:PGCLIENTENCODING = 'UTF8'
 --   psql "$env:POSTGRES_DW_DSN_LOCAL" -v ON_ERROR_STOP=1 -f analytics/sql/01_create_base_views.sql
--- Chạy lại nhiều lần được (CREATE OR REPLACE). Chỉ đọc gold.vw_fact_report và
--- pipeline.run_state; chỉ tạo object trong schema analytics.
+-- If a view's column names, order or types change: DROP VIEW analytics.<name>; then re-run.
 --
--- Nếu đổi tên/thứ tự/kiểu cột của một view đã tạo: DROP VIEW analytics.<tên>; rồi chạy lại.
---
--- NGUỒN (đã đối chiếu với sql/schema_full.sql):
---   gold.vw_fact_report có đủ cột dùng ở đây, TRỪ row_hash (Gold không có).
---   row_hash được tính lại trong analytics với đúng công thức silver.compute_row_hash
---   (5 trường: price_vnd, price_is_negotiable, is_expired, has_warning, area_m2)
---   để không đọc Silver; QA đối chiếu mẫu với silver.listing_history.row_hash.
---   pipeline.run_state: run_id, started_at (timestamptz), ended_at, stopped_reason,
---   detail_pages_done (chỉ chứa lần chạy DAG 2).
+-- Sources:
+--   gold.vw_fact_report has no row_hash, so it is recomputed here with the same formula as
+--   silver.compute_row_hash (price_vnd, price_is_negotiable, is_expired, has_warning, area_m2).
+--   pipeline.run_state holds DAG 2 runs only.
 
 CREATE SCHEMA IF NOT EXISTS analytics;
 
 -- ---------------------------------------------------------------------------
--- 1. vw_listing_latest: mỗi listing một dòng (bản có MAX(valid_from)) + cờ/quy tắc
---    Không dùng is_current/valid_to vì merge SCD2 đảo thứ tự (00_discovery mục 3.1)
+-- 1. vw_listing_latest: one row per listing (the row with MAX(valid_from)) plus flags and filter rules.
+--    is_current / valid_to are not used: the SCD2 merge can invert them (docs/00_discovery.md section 3.1).
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE VIEW analytics.vw_listing_latest AS
 WITH latest AS (
@@ -34,14 +29,14 @@ step1 AS (
             WHEN 'Cần bán' THEN 'sale'
             WHEN 'Cho thuê' THEN 'rent'
         END AS deal_type,
-        -- Phân nhóm theo tỉnh cũ (province_new luôn là TP.HCM)
+        -- Region group by old province (province_new is always TP.HCM)
         CASE
             WHEN l.province_old ILIKE '%Bà Rịa%' THEN 'brvt_old'
             WHEN l.province_old ILIKE '%Bình Dương%' THEN 'binh_duong_old'
             ELSE 'hcm_old'
         END AS region_group,
-        -- Tỷ lệ diện tích / (dài x ngang); chỉ tính khi kích thước đáng tin:
-        -- dài x ngang < 20 m2 coi là kích thước giả (vd 1 x 1, 2 x 5 thay cho 5 x 20), xem qa/06_r7_diagnose.sql
+        -- area_m2 / (length_m x width_m), only for plausible dimensions:
+        -- length x width < 20 m2 is treated as unreliable (e.g. 1 x 1), see qa/06_r7_diagnose.sql
         CASE
             WHEN l.length_m > 0 AND l.width_m > 0 AND l.length_m * l.width_m >= 20
                 THEN l.area_m2 / (l.length_m * l.width_m)
@@ -53,7 +48,7 @@ step1 AS (
             WHEN l.area_m2 < 100 THEN '3_60_100'
             ELSE '4_ge_100'
         END AS area_band,
-        -- Định nghĩa usable của Day 1 (cờ Gold); NULL của cờ coi như FALSE
+        -- Usable per the Gold flags; NULL flags count as FALSE
         (
             l.price_per_m2_vnd IS NOT NULL
             AND NOT COALESCE(l.price_is_negotiable, FALSE)
@@ -72,14 +67,14 @@ step2 AS (
 )
 SELECT
     t.*,
-    -- Thứ tự ưu tiên: dòng đầu khớp thì dừng (metrics.md mục 4)
+    -- Priority order: the first matching rule wins (docs/metrics.md section 4)
     CASE
         WHEN t.deal_type = 'sale' AND t.price_per_m2_vnd < 1000000 THEN 'sale_ppm2_lt_1m'
         WHEN t.deal_type = 'rent' AND t.price_per_m2_vnd >= 10000000 THEN 'rent_ppm2_ge_10m'
         WHEN t.deal_type = 'rent' AND t.price_per_m2_vnd < 10000 THEN 'rent_ppm2_lt_10k'
         WHEN t.area_suspect THEN 'area_suspect'
     END AS exclude_reason,
-    -- Cột lọc duy nhất cho mọi chỉ số giá/m²
+    -- Single filter column for all price/m2 metrics
     (
         t.is_usable
         AND NOT t.is_commercial_building
@@ -93,8 +88,8 @@ SELECT
 FROM step2 AS t;
 
 -- ---------------------------------------------------------------------------
--- 2. vw_listing_versions: lịch sử version, loại bản trùng hash liên tiếp
---    Sắp xếp theo valid_from (không tin valid_to/is_current)
+-- 2. vw_listing_versions: version history without consecutive duplicate hashes.
+--    Ordered by valid_from (valid_to / is_current are not trusted).
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE VIEW analytics.vw_listing_versions AS
 WITH hashed AS (
@@ -106,7 +101,7 @@ WITH hashed AS (
         f.posted_date,
         f.is_expired,
         f.price_vnd,
-        -- Cùng công thức silver.compute_row_hash (đổi một bên phải đổi cả hai)
+        -- Same formula as silver.compute_row_hash (change both together)
         MD5(
             COALESCE(f.price_vnd::TEXT, 'NULL') || '|' ||
             f.price_is_negotiable::TEXT || '|' ||
@@ -124,7 +119,7 @@ ordered AS (
     WINDOW w AS (PARTITION BY h.listing_id ORDER BY h.valid_from, h.listing_key)
 ),
 kept AS (
-    -- Giữ version đầu tiên của mỗi chuỗi hash giống nhau
+    -- Keep the first version of each run of identical hashes
     SELECT *
     FROM ordered
     WHERE prev_row_hash IS NULL OR row_hash IS DISTINCT FROM prev_row_hash
@@ -158,7 +153,7 @@ SELECT
     n.price_vnd,
     n.prev_price_vnd,
     n.prev_source_name,
-    -- Ép múi giờ VN để kết quả giống nhau ở DataGrip và Metabase (múi giờ phiên có thể khác)
+    -- Vietnam time zone keeps results identical in DataGrip and Metabase (session time zone may differ)
     ((n.valid_from AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
         - (n.prev_valid_from AT TIME ZONE 'Asia/Ho_Chi_Minh')::date) AS days_since_prev_version,
     (
@@ -174,12 +169,12 @@ SELECT
 FROM numbered AS n;
 
 -- ---------------------------------------------------------------------------
--- 3. vw_crawl_coverage: số lần chạy theo ngày (kể cả ngày 0 lần) từ pipeline.run_state
---    Múi giờ Asia/Ho_Chi_Minh; dùng làm mặt nạ "ngày thiếu dữ liệu"
+-- 3. vw_crawl_coverage: DAG 2 runs per day from pipeline.run_state, including days with 0 runs.
+--    Asia/Ho_Chi_Minh time zone; used as the "missing data day" mask.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE VIEW analytics.vw_crawl_coverage AS
 WITH params AS (
-    SELECT 20 AS full_day_min_runs   -- ngưỡng tạm (DAG chạy hằng giờ)
+    SELECT 20 AS full_day_min_runs   -- runs per day that count as a full day (DAG runs hourly)
 ),
 runs AS (
     SELECT

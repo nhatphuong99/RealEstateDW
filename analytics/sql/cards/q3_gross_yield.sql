@@ -1,14 +1,14 @@
 -- analytics/sql/cards/q3_gross_yield.sql
--- Tab Q3 "Gross yield theo quận". Gross yield = 12 × median giá/m² thuê tháng ÷ median giá/m² bán (docs/metrics.md mục 3).
--- Ô = (region_group, district_old, property_type_name); chỉ giữ ô mà CẢ bán và thuê có n >= 30.
--- Chỉ 3 loại hình: Căn hộ chung cư, Nhà mặt tiền, Nhà trong hẻm. Ước tính khu vực, KHÔNG phải cùng một tài sản.
--- Cả hai vế cùng đơn vị VND/m², nên tỷ số không cần quy đổi; cột hiển thị bán = triệu VND/m², thuê = triệu VND/m²/năm.
--- Field Filter (Dropdown), map vào analytics.vw_listing_latest:
---   {{loai_hinh}} -> property_type_name, {{nguon}} -> source_name, {{vung}} -> region_group
--- KHÔNG đặt alias cho analytics.vw_listing_latest. Card nào cũng lặp lại CTE `cell`.
--- Chạy thử trên DataGrip: xóa các dòng [[AND {{...}}]] hoặc thay bằng điều kiện thật.
+-- Tab Q3 "Gross yield theo quận". Gross yield = 12 x median monthly rent per m2 / median sale price per m2 (docs/metrics.md section 3).
+-- Cell = (region_group, district_old, property_type_name); a cell counts only if BOTH sale and rent have n >= 30.
+-- Only 3 property types: Căn hộ chung cư, Nhà mặt tiền, Nhà trong hẻm. A district-level estimate, not the same asset.
+-- Both sides are VND/m2, so the ratio needs no unit conversion. Display: sale = million VND/m2, rent x 12 = million VND/m2/year.
+-- Field Filters (Dropdown) mapped to analytics.vw_listing_latest:
+--   loai_hinh -> property_type_name, nguon -> source_name, vung -> region_group
+-- Do not alias analytics.vw_listing_latest. Every card repeats the cell CTE.
+-- To test in DataGrip: remove the optional [[AND ...]] filter lines or replace them with real conditions.
 
--- CARD 1: "Tổng quan theo loại hình" (Table 3 dòng; KHÔNG có biến {{loai_hinh}}, không nối bộ lọc Loại BĐS): median yield của các quận đạt n >= 30 ở cả hai vế
+-- CARD 1 "Tổng quan theo loại hình": median yield of qualified districts per property type (Table, 3 rows); no loai_hinh variable, do not connect the property-type dashboard filter
 WITH cell AS (
     SELECT
         region_group,
@@ -43,7 +43,7 @@ FROM qualified
 GROUP BY property_type_name
 ORDER BY property_type_name;
 
--- CARD 2: "Gross yield theo quận" (Bar dọc, xếp giảm dần; nên đặt {{loai_hinh}} Required, mặc định "Căn hộ chung cư")
+-- CARD 2 "Gross yield theo quận": yield by district (vertical Bar, sorted descending); set loai_hinh Required, default "Căn hộ chung cư"
 WITH cell AS (
     SELECT
         region_group,
@@ -71,7 +71,7 @@ FROM cell
 WHERE n_ban >= 30 AND n_thue >= 30
 ORDER BY 12 * median_thue_vnd / median_ban_vnd DESC;
 
--- CARD 3: "Bảng quận" (Table: median bán, median thuê × 12, yield, n bán, n thuê)
+-- CARD 3 "Bảng quận": district table (sale median, rent x 12, yield, n sale, n rent) (Table)
 WITH cell AS (
     SELECT
         region_group,
