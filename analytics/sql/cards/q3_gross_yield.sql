@@ -43,7 +43,7 @@ FROM qualified
 GROUP BY property_type_name
 ORDER BY property_type_name;
 
--- CARD 2: "Gross yield theo quận" (Bar ngang, xếp giảm dần; nên đặt {{loai_hinh}} Required, mặc định "Căn hộ chung cư")
+-- CARD 2: "Gross yield theo quận" (Bar dọc, xếp giảm dần; nên đặt {{loai_hinh}} Required, mặc định "Căn hộ chung cư")
 WITH cell AS (
     SELECT
         region_group,

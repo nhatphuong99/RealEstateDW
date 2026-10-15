@@ -41,7 +41,7 @@ SELECT
         WHEN '4_ge_100' THEN 'Từ 100 m² trở lên'
     END AS nhom_dien_tich,
     COUNT(*) AS so_o,
-    ROUND((100 * percentile_cont(0.5) WITHIN GROUP (ORDER BY discount))::numeric, 1) AS chiet_khau_median_pct
+    ROUND((100 * percentile_cont(0.5) WITHIN GROUP (ORDER BY discount))::numeric, 2) AS chiet_khau_median_pct
 FROM qualified
 GROUP BY area_band
 ORDER BY area_band;
@@ -76,7 +76,7 @@ SELECT
     END AS nhom_dien_tich,
     ROUND((c.median_vnd / 1e6)::numeric, 2) AS median_trieu_m2,
     ROUND((b.base_vnd / 1e6)::numeric, 2) AS co_so_trieu_m2,
-    ROUND((100 * (c.median_vnd / b.base_vnd - 1))::numeric, 1) AS chiet_khau_pct,
+    ROUND((100 * (c.median_vnd / b.base_vnd - 1))::numeric, 2) AS chiet_khau_pct,
     c.n,
     b.n_co_so
 FROM cell c
@@ -117,7 +117,7 @@ SELECT
         WHEN '4_ge_100' THEN 'Từ 100 m² trở lên'
     END AS nhom_dien_tich,
     COUNT(*) AS so_o,
-    ROUND((100 * percentile_cont(0.5) WITHIN GROUP (ORDER BY discount))::numeric, 1) AS chiet_khau_median_pct
+    ROUND((100 * percentile_cont(0.5) WITHIN GROUP (ORDER BY discount))::numeric, 2) AS chiet_khau_median_pct
 FROM qualified
 GROUP BY property_type_name, area_band
 -- Xếp theo nhóm diện tích trước: Metabase lấy thứ tự trục X theo lần xuất hiện đầu tiên

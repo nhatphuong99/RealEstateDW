@@ -53,7 +53,7 @@ SELECT
     source_name AS nguon,
     COUNT(*) AS so_listing,
     COUNT(*) FILTER (WHERE is_expired) AS het_han,
-    ROUND(100.0 * COUNT(*) FILTER (WHERE is_expired) / COUNT(*), 1) AS ty_le_het_han_pct
+    ROUND(100.0 * COUNT(*) FILTER (WHERE is_expired) / COUNT(*), 2) AS ty_le_het_han_pct
 FROM analytics.vw_listing_latest
 GROUP BY 1
 ORDER BY 1;

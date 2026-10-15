@@ -33,7 +33,7 @@ qualified AS (
     FROM cell
     WHERE n_mt >= 30 AND n_hem >= 30
 )
-SELECT ROUND((100 * percentile_cont(0.5) WITHIN GROUP (ORDER BY premium))::numeric, 1) AS premium_median_pct
+SELECT ROUND((100 * percentile_cont(0.5) WITHIN GROUP (ORDER BY premium))::numeric, 2) AS premium_median_pct
 FROM qualified;
 
 -- CARD 2: "Số ô đủ mẫu" (Number)
@@ -107,7 +107,7 @@ SELECT
     END AS nhom_dien_tich,
     n_mt,
     n_hem,
-    ROUND((100 * (median_mt_vnd / median_hem_vnd - 1))::numeric, 1) AS premium_pct
+    ROUND((100 * (median_mt_vnd / median_hem_vnd - 1))::numeric, 2) AS premium_pct
 FROM cell
 WHERE n_mt >= 30 AND n_hem >= 30
 ORDER BY median_mt_vnd / median_hem_vnd DESC
@@ -147,7 +147,7 @@ SELECT
         WHEN '3_60_100' THEN '60 – 100 m²' WHEN '4_ge_100' THEN 'Từ 100 m² trở lên'
     END AS nhom_dien_tich,
     COUNT(*) AS so_phuong,
-    ROUND((100 * percentile_cont(0.5) WITHIN GROUP (ORDER BY premium))::numeric, 1) AS premium_median_pct
+    ROUND((100 * percentile_cont(0.5) WITHIN GROUP (ORDER BY premium))::numeric, 2) AS premium_median_pct
 FROM qualified
 GROUP BY area_band
 ORDER BY area_band;
@@ -181,7 +181,7 @@ SELECT
     END AS nhom_dien_tich,
     ROUND((median_mt_vnd / 1e6)::numeric, 2) AS median_mat_tien_trieu_m2,
     ROUND((median_hem_vnd / 1e6)::numeric, 2) AS median_hem_trieu_m2,
-    ROUND((100 * (median_mt_vnd / median_hem_vnd - 1))::numeric, 1) AS premium_pct,
+    ROUND((100 * (median_mt_vnd / median_hem_vnd - 1))::numeric, 2) AS premium_pct,
     n_mt,
     n_hem
 FROM cell

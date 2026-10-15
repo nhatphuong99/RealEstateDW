@@ -33,7 +33,7 @@ SELECT
     date_trunc('week', posted_date)::date AS tuan,
     source_name AS nguon,
     COUNT(*) AS n,
-    ROUND(100.0 * COUNT(*) FILTER (WHERE region_group = 'hcm_old') / COUNT(*), 1) AS ty_trong_hcm_cu_pct,
+    ROUND(100.0 * COUNT(*) FILTER (WHERE region_group = 'hcm_old') / COUNT(*), 2) AS ty_trong_hcm_cu_pct,
     ROUND((percentile_cont(0.5) WITHIN GROUP (ORDER BY price_per_m2_vnd) / 1000000)::numeric, 2) AS median_tat_ca,
     ROUND((percentile_cont(0.5) WITHIN GROUP (ORDER BY price_per_m2_vnd)
            FILTER (WHERE region_group = 'hcm_old') / 1000000)::numeric, 2) AS median_hcm_cu

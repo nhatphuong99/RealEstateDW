@@ -46,7 +46,7 @@ WITH pairs AS (
 )
 SELECT
     CASE WHEN COUNT(*) >= 30
-         THEN ROUND((100.0 * COUNT(*) FILTER (WHERE pct < 0) / COUNT(*))::numeric, 1)
+         THEN ROUND((100.0 * COUNT(*) FILTER (WHERE pct < 0) / COUNT(*))::numeric, 2)
     END AS ty_le_giam_pct
 FROM pairs
 WHERE price_vnd <> prev_price_vnd;
@@ -69,9 +69,9 @@ WITH pairs AS (
 )
 SELECT
     COUNT(*) AS n,
-    CASE WHEN COUNT(*) >= 30 THEN ROUND((100 * percentile_cont(0.25) WITHIN GROUP (ORDER BY pct))::numeric, 1) END AS p25_pct,
-    CASE WHEN COUNT(*) >= 30 THEN ROUND((100 * percentile_cont(0.50) WITHIN GROUP (ORDER BY pct))::numeric, 1) END AS median_pct,
-    CASE WHEN COUNT(*) >= 30 THEN ROUND((100 * percentile_cont(0.75) WITHIN GROUP (ORDER BY pct))::numeric, 1) END AS p75_pct
+    CASE WHEN COUNT(*) >= 30 THEN ROUND((100 * percentile_cont(0.25) WITHIN GROUP (ORDER BY pct))::numeric, 2) END AS p25_pct,
+    CASE WHEN COUNT(*) >= 30 THEN ROUND((100 * percentile_cont(0.50) WITHIN GROUP (ORDER BY pct))::numeric, 2) END AS median_pct,
+    CASE WHEN COUNT(*) >= 30 THEN ROUND((100 * percentile_cont(0.75) WITHIN GROUP (ORDER BY pct))::numeric, 2) END AS p75_pct
 FROM pairs
 WHERE price_vnd <> prev_price_vnd;
 
@@ -110,9 +110,9 @@ changed AS (
     WHERE price_vnd <> prev_price_vnd
 ),
 bucket (nhom_no, nhom_doi_gia) AS (
-    VALUES (1, 'Giảm từ 50% trở lên'), (2, 'Giảm 20 – 50%'), (3, 'Giảm 10 – 20%'),
-           (4, 'Giảm 5 – 10%'), (5, 'Giảm 2 – 5%'), (6, 'Giảm dưới 2%'),
-           (7, 'Tăng dưới 10%'), (8, 'Tăng 10 – 50%'), (9, 'Tăng từ 50% trở lên')
+    VALUES (1, 'Giảm ≥50%'), (2, 'Giảm 20–50%'), (3, 'Giảm 10–20%'),
+           (4, 'Giảm 5–10%'), (5, 'Giảm 2–5%'), (6, 'Giảm <2%'),
+           (7, 'Tăng <10%'), (8, 'Tăng 10–50%'), (9, 'Tăng ≥50%')
 )
 SELECT
     b.nhom_doi_gia,
@@ -151,7 +151,7 @@ SELECT
     COUNT(*) AS so_cap,
     COUNT(*) FILTER (WHERE price_vnd <> prev_price_vnd) AS so_cap_doi_gia,
     CASE WHEN COUNT(*) FILTER (WHERE price_vnd <> prev_price_vnd) >= 30
-         THEN ROUND((100 * percentile_cont(0.5) WITHIN GROUP (ORDER BY pct) FILTER (WHERE price_vnd <> prev_price_vnd))::numeric, 1)
+         THEN ROUND((100 * percentile_cont(0.5) WITHIN GROUP (ORDER BY pct) FILTER (WHERE price_vnd <> prev_price_vnd))::numeric, 2)
     END AS median_pct_doi_gia
 FROM grp
 GROUP BY nhom_no
