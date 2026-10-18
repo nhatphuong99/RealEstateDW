@@ -1,4 +1,4 @@
--- analytics/sql/qa/q5_sizing.sql
+-- analytics/qa/q5_sizing.sql
 -- Q5 sample sizing before building the cards. Read-only on analytics.vw_listing_versions.
 -- Pair = two adjacent versions of the same listing_id ordered by valid_from (valid_to / is_current not used).
 -- Run one block at a time in DataGrip (select the block, Ctrl+Enter).

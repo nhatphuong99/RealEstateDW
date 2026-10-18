@@ -1,4 +1,4 @@
--- analytics/sql/qa/q5_qa.sql
+-- analytics/qa/q5_qa.sql
 -- Q5 QA and diagnostics (read-only). Run one block at a time in DataGrip (select the block, Ctrl+Enter).
 
 -- BLOCK A: reconcile with sizing. Expected: so_cap_doi_gia_sizing and so_giam_sizing match q5_sizing.sql block 1;

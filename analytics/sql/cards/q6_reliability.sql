@@ -1,5 +1,5 @@
 -- analytics/sql/cards/q6_reliability.sql
--- Tab Q6 "Độ tin cậy dữ liệu" (docs/dashboard_v2_wireframe.md). Each CARD block is one Metabase SQL question
+-- Tab Q6 "Độ tin cậy dữ liệu". Each CARD block is one Metabase SQL question
 -- (database real_estate_dw). No Field Filters on this tab; every block runs as-is in DataGrip.
 
 -- CARD 1 "Ngày không có lần chạy": days with no run (Number)

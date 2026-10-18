@@ -8,7 +8,7 @@
 --
 -- Time window: defined once per card in its params CTE (full ISO weeks inside each source's coverage).
 -- nguon = source of the latest version: a dataset listing revisited by the web counts as web with the new posted_date
--- (docs/metrics.md section 10).
+-- (docs/metrics.md section 7).
 
 -- CARD 0 (QA only, not on the dashboard): listings per week and source over all posted_date
 SELECT

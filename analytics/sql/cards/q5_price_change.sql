@@ -3,7 +3,7 @@
 -- Pair = previous (dataset) and next (web) version of the same listing_id; only pairs with BOTH prices > 0.
 -- Price change = price_vnd <> prev_price_vnd. pct = (new - old) / old, computed here (not the view's price_change_pct).
 -- The sample only has pairs with different hashes, so there is NO "share of revisited listings that changed price",
--- and it does not represent the market (docs/metrics.md sections 7 and 10).
+-- and it does not represent the market (docs/metrics.md sections 2 and 7).
 -- Field Filter (Dropdown) mapped to analytics.vw_listing_latest: loai_tin -> listing_type
 -- Do not alias analytics.vw_listing_latest (alias v on vw_listing_versions is fine). Every card repeats the pairs CTE.
 -- To test in DataGrip: remove the optional [[AND ...]] line or replace it with a real condition.
@@ -76,7 +76,7 @@ FROM pairs
 WHERE price_vnd <> prev_price_vnd;
 
 -- CARD 4 "Phân bố mức đổi giá": distribution of price changes (Bar; X = nhom_doi_gia); open-ended tails expose outliers
--- Symmetric tails (<= -50%, >= +50%) match block C of sql/qa/q5_qa.sql. Always 9 buckets (empty = 0);
+-- Symmetric tails (<= -50%, >= +50%) match block C of qa/q5_qa.sql. Always 9 buckets (empty = 0);
 -- the card is hidden when changed pairs < 30. ORDER BY nhom_no: Metabase orders the X axis by first appearance.
 WITH pairs AS (
     SELECT

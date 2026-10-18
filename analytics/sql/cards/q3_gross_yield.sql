@@ -1,5 +1,5 @@
 -- analytics/sql/cards/q3_gross_yield.sql
--- Tab Q3 "Gross yield theo quận". Gross yield = 12 x median monthly rent per m2 / median sale price per m2 (docs/metrics.md section 3).
+-- Tab Q3 "Gross yield theo quận". Gross yield = 12 x median monthly rent per m2 / median sale price per m2 (docs/metrics.md section 2).
 -- Cell = (region_group, district_old, property_type_name); a cell counts only if BOTH sale and rent have n >= 30.
 -- Only 3 property types: Căn hộ chung cư, Nhà mặt tiền, Nhà trong hẻm. A district-level estimate, not the same asset.
 -- Both sides are VND/m2, so the ratio needs no unit conversion. Display: sale = million VND/m2, rent x 12 = million VND/m2/year.

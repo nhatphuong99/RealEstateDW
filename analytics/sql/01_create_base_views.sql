@@ -14,7 +14,7 @@ CREATE SCHEMA IF NOT EXISTS analytics;
 
 -- ---------------------------------------------------------------------------
 -- 1. vw_listing_latest: one row per listing (the row with MAX(valid_from)) plus flags and filter rules.
---    is_current / valid_to are not used: the SCD2 merge can invert them (docs/00_discovery.md section 3.1).
+--    is_current / valid_to are not used: the SCD2 merge can invert them (docs/metrics.md section 6.1).
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE VIEW analytics.vw_listing_latest AS
 WITH latest AS (
@@ -67,7 +67,7 @@ step2 AS (
 )
 SELECT
     t.*,
-    -- Priority order: the first matching rule wins (docs/metrics.md section 4)
+    -- Priority order: the first matching rule wins (docs/metrics.md section 3)
     CASE
         WHEN t.deal_type = 'sale' AND t.price_per_m2_vnd < 1000000 THEN 'sale_ppm2_lt_1m'
         WHEN t.deal_type = 'rent' AND t.price_per_m2_vnd >= 10000000 THEN 'rent_ppm2_ge_10m'

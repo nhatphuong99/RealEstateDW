@@ -1,5 +1,5 @@
 -- analytics/sql/cards/q4_area_discount.sql
--- Tab Q4 "Chiết khấu giá/m² theo diện tích" (docs/metrics.md section 3).
+-- Tab Q4 "Chiết khấu giá/m² theo diện tích" (docs/metrics.md section 2).
 -- Sale only (deal_type = 'sale' is hard-coded, no listing-type filter): Q4 serves buyers, and mixing rent would mix price units.
 -- Cell = (region_group, deal_type, property_type_name, district_old, area_band).
 -- Discount = median(band) / median(base band 2_40_60) - 1, within the SAME property type x district.

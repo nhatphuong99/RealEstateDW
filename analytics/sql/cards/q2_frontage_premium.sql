@@ -1,5 +1,5 @@
 -- analytics/sql/cards/q2_frontage_premium.sql
--- Tab Q2 "Mặt tiền đắt hơn hẻm bao nhiêu % cùng phường". Sale only (docs/metrics.md section 3).
+-- Tab Q2 "Mặt tiền đắt hơn hẻm bao nhiêu % cùng phường". Sale only (docs/metrics.md section 2).
 -- Cell = (ward_new, area_band); premium = median(Nhà mặt tiền) / median(Nhà trong hẻm) - 1.
 -- A cell counts only if BOTH groups have n >= 30. Headline = median of the qualified cells' premiums (unweighted).
 -- Field Filters (Dropdown) mapped to analytics.vw_listing_latest:

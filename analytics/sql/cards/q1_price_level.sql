@@ -1,5 +1,5 @@
 -- analytics/sql/cards/q1_price_level.sql
--- Tab Q1 "Mặt bằng giá/m²": median, p25, p75, n; groups with n < 30 are hidden (docs/metrics.md section 3).
+-- Tab Q1 "Mặt bằng giá/m²": median, p25, p75, n; groups with n < 30 are hidden (docs/metrics.md section 2).
 -- Field Filters (Dropdown) mapped to analytics.vw_listing_latest:
 --   loai_tin -> listing_type, loai_hinh -> property_type_name, nguon -> source_name, vung -> region_group
 -- Do not alias analytics.vw_listing_latest. Always GROUP BY deal_type so sale and rent are never mixed.

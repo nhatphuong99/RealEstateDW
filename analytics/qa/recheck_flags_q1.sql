@@ -1,9 +1,9 @@
--- analytics/sql/qa/recheck_flags_q1.sql
+-- analytics/qa/recheck_flags_q1.sql
 -- Re-checks (1) R1-R7 counts and is_analysis_ready, (2) total n of the districts in Q1 CARD 2.
 -- Read-only on analytics.vw_listing_latest. Run one block at a time in DataGrip (select the block, Ctrl+Enter).
 
 -- BLOCK A: recount R1-R7 on the latest versions (is_usable basis, same as QA D4a).
--- Compare with docs/metrics.md section 9.2: each count may change by at most the number of Gold rows added since that snapshot.
+-- Compare with docs/metrics.md section 5.2: each count may change by at most the number of Gold rows added since that snapshot.
 SELECT
     COUNT(*) AS so_listing,
     COUNT(*) FILTER (WHERE is_usable) AS usable,
